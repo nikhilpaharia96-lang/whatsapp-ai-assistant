@@ -1,0 +1,733 @@
+{
+  "name": "WhatsApp AI Assistant \u2014 Main (Gemini)",
+  "nodes": [
+    {
+      "id": "node_webhook",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "node_validate",
+      "name": "Validate & Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// \u2500\u2500 Validate webhook payload from Evolution API \u2500\u2500\nconst body = $input.first().json.body || $input.first().json;\n\n// Ignore non-message events (receipts, status updates, etc.)\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// Only handle text messages\nif (!['conversation','extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\n// Extract message content\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\n\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// Ignore own outgoing messages (Evolution echoes them)\nif (msg.key?.fromMe === true) {\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// Parse phone number (Evolution sends JID: 1234567890@s.whatsapp.net)\nconst rawJid = msg.key?.remoteJid || '';\nconst phone = '+' + rawJid.replace('@s.whatsapp.net', '').replace('@g.us', '');\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
+      }
+    },
+    {
+      "id": "node_skip_check",
+      "name": "Skip check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_respond_skip",
+      "name": "Respond 200 (skip)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        680,
+        160
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true, \"skipped\": true }"
+      }
+    },
+    {
+      "id": "node_rate_limit",
+      "name": "Rate Limit Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        680,
+        380
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH window AS (\n  SELECT NOW() - INTERVAL '1 hour' AS start\n),\nupsert AS (\n  INSERT INTO rate_limits (phone, window_start, message_count)\n  VALUES ($1, DATE_TRUNC('hour', NOW()), 1)\n  ON CONFLICT (phone, window_start)\n  DO UPDATE SET message_count = rate_limits.message_count + 1\n  RETURNING message_count\n)\nSELECT message_count FROM upsert;",
+        "additionalFields": {
+          "queryParams": "={{ [$json.phone] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_rate_check_if",
+      "name": "Rate limit exceeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.message_count }}",
+              "operation": "larger",
+              "value2": "={{ $env.RATE_LIMIT_PER_HOUR || 20 }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_rate_exceeded_respond",
+      "name": "Respond 429",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        220
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 429,
+        "responseBody": "={ \"ok\": false, \"error\": \"rate_limit\" }"
+      }
+    },
+    {
+      "id": "node_load_contact",
+      "name": "Load or Create Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1080,
+        460
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (phone, contact_type, last_active)\nVALUES ($1, 'unknown', NOW())\nON CONFLICT (phone) DO UPDATE\n  SET last_active = NOW()\nRETURNING id, phone, display_name, contact_type,\n          tone_override, is_blocked, notes, metadata;",
+        "additionalFields": {
+          "queryParams": "={{ [$('node_validate').item.json.phone] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_blocked_check",
+      "name": "Blocked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        460
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_blocked }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_blocked_respond",
+      "name": "Respond 200 (blocked)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1480,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true, \"skipped\": \"blocked\" }"
+      }
+    },
+    {
+      "id": "node_load_history",
+      "name": "Load Conversation History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1480,
+        540
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT role, content, created_at\nFROM messages\nWHERE contact_id = $1\n  AND created_at > NOW() - INTERVAL '48 hours'\nORDER BY created_at ASC\nLIMIT 30;",
+        "additionalFields": {
+          "queryParams": "={{ [$('node_load_contact').item.json.id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_load_portfolio",
+      "name": "Load Portfolio (clients only)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1480,
+        660
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT category, title, content\nFROM portfolio\nWHERE is_active = TRUE\nORDER BY category, title;",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_save_incoming",
+      "name": "Save Incoming Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1700,
+        540
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (contact_id, role, content, wa_message_id)\nVALUES ($1, 'user', $2, $3)\nON CONFLICT DO NOTHING\nRETURNING id;",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $('node_load_contact').item.json.id,\n  $('node_validate').item.json.text,\n  $('node_validate').item.json.messageId\n] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_build_prompt",
+      "name": "Build AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        540
+      ],
+      "parameters": {
+        "jsCode": "// \u2500\u2500 Build the full prompt for GPT-4.1 \u2500\u2500\n\nconst contact    = $('node_load_contact').item.json;\nconst history    = $('node_load_history').all().map(h => h.json);\nconst portfolio  = $('node_load_portfolio').all().map(p => p.json);\nconst incoming   = $('node_validate').item.json;\nconst yourName   = $env.YOUR_NAME || 'Alex';\n\n// \u2500\u2500 Tone definitions per contact type \u2500\u2500\nconst TONES = {\n  friend: `You are ${yourName}. You are chatting with a close friend. Keep it casual, warm, and real. Use contractions freely. Match their energy. Be witty when appropriate. Keep replies concise unless the conversation calls for depth. Don't start every message with their name.`,\n  family: `You are ${yourName}. You are talking with a family member. Be loving, warm, and attentive. Check in genuinely. Offer help naturally. Keep a caring tone without being patronizing.`,\n  client: `You are ${yourName}, a professional developer and consultant. You are speaking with a potential or existing client. Be confident, clear, and professional\u2014but still warm and human. Highlight relevant experience when appropriate. Use their name occasionally. Gently guide conversations toward understanding their needs.`,\n  unknown: `You are ${yourName}. Someone new has messaged you. Be friendly and curious, but slightly reserved. Try to understand who they are and what they need without being interrogative. Keep replies brief until context is clear.`\n};\n\nconst contactType = contact.tone_override || contact.contact_type || 'unknown';\nconst tonePrompt  = TONES[contactType] || TONES.unknown;\n\n// \u2500\u2500 Portfolio context (only for clients) \u2500\u2500\nlet portfolioContext = '';\nif (contactType === 'client' && portfolio.length > 0) {\n  portfolioContext = '\\n\\n## Your Professional Context\\nUse the following information naturally in conversation when relevant. Don\\'t dump it all at once\u2014weave it in naturally.\\n';\n  portfolio.forEach(p => {\n    portfolioContext += `\\n### ${p.title}\\n${p.content}\\n`;\n  });\n}\n\n// \u2500\u2500 Core persona instructions \u2500\u2500\nconst systemPrompt = `${tonePrompt}\n\n## Core Rules\n- You ARE ${yourName}. Never admit you are an AI under any circumstances unless explicitly instructed to in a separate trigger message.\n- Reply naturally, like a real human texting. Keep messages readable\u2014not walls of text.\n- Ask follow-up questions naturally to keep conversation flowing.\n- If you're uncertain about something personal, say you'll check later.\n- Match the language/language register the person uses.\n- Never use robotic phrases like \"Certainly!\", \"Of course!\", \"As an AI...\".\n- If someone asks if you're a bot, deflect naturally (\"haha why do you ask?\") and change subject.\n\n## Contact Context\n- Name: ${contact.display_name || 'Unknown'}\n- Type: ${contactType}\n- Notes: ${contact.notes || 'none'}\n\n## Escalation Triggers\nIf the conversation involves ANY of these, respond normally but add a special JSON block at the very end of your reply (after your human message), on a new line, exactly as shown:\n- Legal threats or serious disputes\n- Medical emergencies\n- Urgent business deals ($5000+)\n- Relationship crises or emotional emergencies\n- Someone asking to speak to you directly/in person urgently\n\nEscalation format (add ONLY if triggered, after your reply):\n[ESCALATE:{\"reason\":\"brief reason\",\"urgency\":\"high\"}]${portfolioContext}`;\n\n// \u2500\u2500 Build messages array for OpenAI \u2500\u2500\nconst messages = [\n  { role: 'system', content: systemPrompt }\n];\n\n// Add conversation history\nhistory.forEach(h => {\n  messages.push({ role: h.role, content: h.content });\n});\n\n// Add the new incoming message\nmessages.push({ role: 'user', content: incoming.text });\n\nreturn [{\n  json: {\n    messages,\n    systemPrompt,\n    contactType,\n    contactId: contact.id,\n    contactName: contact.display_name,\n    phone: incoming.phone,\n    instanceName: incoming.instanceName,\n    originalText: incoming.text\n  }\n}];"
+      }
+    },
+    {
+      "id": "node_openai",
+      "name": "Gemini AI Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2100,
+        540
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-2.0-flash' }}:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"system_instruction\": {\n    \"parts\": [{ \"text\": {{ JSON.stringify($json.systemPrompt) }} }]\n  },\n  \"contents\": {{ JSON.stringify($json.messages.filter(m => m.role !== 'system').map(m => ({\n    \"role\": m.role === 'assistant' ? 'model' : 'user',\n    \"parts\": [{ \"text\": m.content }]\n  }))) }},\n  \"generationConfig\": {\n    \"maxOutputTokens\": {{ $env.GEMINI_MAX_TOKENS || 1000 }},\n    \"temperature\": {{ $env.GEMINI_TEMPERATURE || 0.85 }}\n  }\n}",
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "enabled": true,
+            "maxRetries": 2,
+            "waitBetweenRetries": 3000
+          }
+        }
+      }
+    },
+    {
+      "id": "node_parse_ai",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2300,
+        540
+      ],
+      "parameters": {
+        "jsCode": "// \u2500\u2500 Parse Gemini response and detect escalation triggers \u2500\u2500\n\nconst candidate = $json.candidates?.[0];\nconst aiRaw = candidate?.content?.parts?.[0]?.text || '';\nconst tokensUsed = ($json.usageMetadata?.promptTokenCount || 0) + ($json.usageMetadata?.candidatesTokenCount || 0);\nconst promptData = $('node_build_prompt').item.json;\n\n// Check for escalation block\nconst escalateMatch = aiRaw.match(/\\[ESCALATE:(\\{.*?\\})\\]/s);\nconst needsEscalation = !!escalateMatch;\nlet escalationData = null;\nif (escalateMatch) {\n  try { escalationData = JSON.parse(escalateMatch[1]); } catch(e) {}\n}\n\n// Clean reply \u2014 remove escalation JSON block from user-facing message\nconst cleanReply = aiRaw\n  .replace(/\\[ESCALATE:\\{.*?\\}\\]/s, '')\n  .trim();\n\n// Split long replies into chunks (WhatsApp ~1500 char limit per message)\nconst MAX_LEN = 1500;\nconst chunks = [];\nif (cleanReply.length <= MAX_LEN) {\n  chunks.push(cleanReply);\n} else {\n  const paras = cleanReply.split(/\\n\\n+/);\n  let current = '';\n  paras.forEach(p => {\n    if ((current + '\\n\\n' + p).length > MAX_LEN && current) {\n      chunks.push(current.trim());\n      current = p;\n    } else {\n      current = current ? current + '\\n\\n' + p : p;\n    }\n  });\n  if (current) chunks.push(current.trim());\n}\n\n// Model name for DB logging\nconst modelUsed = $env.GEMINI_MODEL || 'gemini-2.0-flash';\n\nreturn [{\n  json: {\n    ...promptData,\n    aiReply: cleanReply,\n    chunks,\n    tokensUsed,\n    model: modelUsed,\n    needsEscalation,\n    escalationData\n  }\n}];"
+      }
+    },
+    {
+      "id": "node_send_reply",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2500,
+        460
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $json.instanceName }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone }}\",\n  \"text\": \"{{ $json.chunks[0] }}\",\n  \"delay\": {{ Math.floor(Math.random() * 2000) + 1000 }}\n}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "node_save_reply",
+      "name": "Save AI Reply to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2500,
+        600
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (contact_id, role, content, tokens_used, model_used)\nVALUES ($1, 'assistant', $2, $3, $4);",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $json.contactId,\n  $json.aiReply,\n  $json.tokensUsed,\n  $json.model\n] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_escalation_check",
+      "name": "Needs Escalation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2700,
+        460
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('node_parse_ai').item.json.needsEscalation }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node_save_escalation",
+      "name": "Save Escalation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2900,
+        360
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO escalations (contact_id, trigger_message, reason)\nVALUES ($1, $2, $3)\nRETURNING id;",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $('node_parse_ai').item.json.contactId,\n  $('node_parse_ai').item.json.originalText,\n  $('node_parse_ai').item.json.escalationData?.reason || 'auto-detected'\n] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_alert_you",
+      "name": "Alert You via WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3100,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $('node_parse_ai').item.json.instanceName }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={\n  \"number\": \"{{ $env.ESCALATION_PHONE }}\",\n  \"text\": \"\ud83d\udea8 *Escalation Alert*\\n\\nFrom: {{ $('node_parse_ai').item.json.contactName || $('node_parse_ai').item.json.phone }}\\nType: {{ $('node_parse_ai').item.json.contactType }}\\nReason: {{ $('node_parse_ai').item.json.escalationData?.reason }}\\n\\nMessage:\\n{{ $('node_parse_ai').item.json.originalText }}\"\n}"
+      }
+    },
+    {
+      "id": "node_log_audit",
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2900,
+        600
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (event_type, phone, payload)\nVALUES ('message_processed', $1, $2::jsonb);",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $('node_parse_ai').item.json.phone,\n  JSON.stringify({\n    contactType: $('node_parse_ai').item.json.contactType,\n    tokensUsed: $('node_parse_ai').item.json.tokensUsed,\n    hadEscalation: $('node_parse_ai').item.json.needsEscalation\n  })\n] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "node_final_respond",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3100,
+        600
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }"
+      }
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate & Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Extract": {
+      "main": [
+        [
+          {
+            "node": "Skip check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip check": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rate Limit Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Check": {
+      "main": [
+        [
+          {
+            "node": "Rate limit exceeded?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate limit exceeded?": {
+      "main": [
+        [
+          {
+            "node": "Respond 429",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load or Create Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load or Create Contact": {
+      "main": [
+        [
+          {
+            "node": "Blocked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Blocked?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (blocked)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load Conversation History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Conversation History": {
+      "main": [
+        [
+          {
+            "node": "Load Portfolio (clients only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Portfolio (clients only)": {
+      "main": [
+        [
+          {
+            "node": "Save Incoming Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Incoming Message": {
+      "main": [
+        [
+          {
+            "node": "Build AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemini AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save AI Reply to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Reply": {
+      "main": [
+        [
+          {
+            "node": "Needs Escalation?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save AI Reply to DB": {
+      "main": [
+        [
+          {
+            "node": "Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Escalation?": {
+      "main": [
+        [
+          {
+            "node": "Save Escalation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Escalation": {
+      "main": [
+        [
+          {
+            "node": "Alert You via WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert You via WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini AI Response": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error_handler"
+  },
+  "tags": [
+    "whatsapp",
+    "ai",
+    "gemini",
+    "production"
+  ]
+}

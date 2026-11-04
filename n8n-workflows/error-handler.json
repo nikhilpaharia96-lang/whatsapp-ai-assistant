@@ -1,0 +1,91 @@
+{
+  "name": "Error Handler",
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "id": "log_error",
+      "name": "Log Error to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        280,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (event_type, phone, payload)\nVALUES ('workflow_error', NULL, $1::jsonb);",
+        "additionalFields": {
+          "queryParams": "={{ [JSON.stringify({\n  workflow: $json.workflow?.name,\n  node: $json.execution?.lastNodeExecuted,\n  error: $json.execution?.error?.message,\n  timestamp: new Date().toISOString()\n})] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "alert_error",
+      "name": "Alert on Critical Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE_NAME || 'default' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={\n  \"number\": \"{{ $env.ESCALATION_PHONE }}\",\n  \"text\": \"⚠️ *System Error*\\nWorkflow: {{ $json.workflow?.name }}\\nError: {{ $json.execution?.error?.message }}\"\n}"
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log Error to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error to DB": {
+      "main": [
+        [
+          {
+            "node": "Alert on Critical Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
