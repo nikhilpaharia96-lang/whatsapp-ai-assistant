@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
     contact_id      UUID         NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     role            VARCHAR(10)  NOT NULL CHECK (role IN ('user','assistant','system')),
     content         TEXT         NOT NULL,
-    wa_message_id   VARCHAR(100),                    -- WhatsApp message ID for dedup
+    wa_message_id   VARCHAR(100) UNIQUE,             -- WhatsApp message ID for dedup (UNIQUE makes ON CONFLICT work)
     tokens_used     INTEGER,
     model_used      VARCHAR(50),
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

@@ -547,6 +547,55 @@
         "responseBody": "={{ JSON.stringify({ ok: true }) }}",
         "options": {}
       }
+    },
+    {
+      "id": "node_dup_check",
+      "name": "Duplicate message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2000,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "node_dup_check-cond",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node_dup_respond",
+      "name": "Respond 200 (duplicate)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, skipped: 'duplicate' }) }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -674,7 +723,7 @@
       "main": [
         [
           {
-            "node": "Build AI Prompt",
+            "node": "Duplicate message?",
             "type": "main",
             "index": 0
           }
@@ -792,6 +841,24 @@
         [
           {
             "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate message?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (duplicate)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build AI Prompt",
             "type": "main",
             "index": 0
           }
