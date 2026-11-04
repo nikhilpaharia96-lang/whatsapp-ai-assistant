@@ -2,6 +2,9 @@
 
 A self-hosted WhatsApp AI assistant powered by **Google Gemini**, **n8n**, and **Evolution API v2**, running entirely in Docker.
 
+> New here? Read **[docs/GUIDE.md](docs/GUIDE.md)** (Hinglish): what this project does, how a message flows
+> through it, and how to customize contacts, tone and portfolio.
+
 ---
 
 ## Quick Start (Windows 11 / Docker Desktop)
