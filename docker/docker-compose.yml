@@ -61,7 +61,8 @@ services:
   # NOTE: n8n v1+ removed N8N_BASIC_AUTH_ACTIVE/USER/PASSWORD.
   # Authentication is now email/password via the owner account.
   # N8N_INSTANCE_OWNER_MANAGED_BY_ENV pre-provisions the owner so
-  # you don't need to click through the setup wizard on first boot.
+  # you don't need to click through the setup wizard on first boot
+  # (requires n8n >= 2.17.0; n8n overwrites the owner from these vars on every start).
   n8n:
     image: n8nio/n8n:latest
     container_name: wa_n8n
@@ -98,16 +99,20 @@ services:
       # ── Logging ───────────────────────────────────────────────
       N8N_LOG_LEVEL: info
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
-      # ── Allow env variables to be read inside expressions ─────
-      # Without this, $env.GEMINI_API_KEY etc. won't resolve in nodes
-      N8N_CUSTOM_ENV_ENABLED: "true"
+      # ── Allow $env.* to be read inside Code nodes / expressions ─
+      # n8n 2.0 blocks this by default (N8N_BLOCK_ENV_ACCESS_IN_NODE=true), which
+      # makes every $env.GEMINI_API_KEY etc. in the workflows fail.
+      # (N8N_CUSTOM_ENV_ENABLED is not an n8n setting.)
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       # Expose the vars the workflows need
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
-      GEMINI_MAX_TOKENS: ${GEMINI_MAX_TOKENS:-1000}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      GEMINI_MAX_TOKENS: ${GEMINI_MAX_TOKENS:-2048}
       GEMINI_TEMPERATURE: ${GEMINI_TEMPERATURE:-0.85}
+      # n8n -> Evolution traffic stays INSIDE the Docker network (never the public URL)
       EVOLUTION_BASE_URL: ${EVOLUTION_BASE_URL:-http://evolution:8080}
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-default}
       ESCALATION_PHONE: ${ESCALATION_PHONE}
       YOUR_NAME: ${YOUR_NAME:-Admin}
       YOUR_PHONE: ${YOUR_PHONE}
@@ -139,21 +144,26 @@ services:
       - "8080:8080"
     environment:
       # ── Server ────────────────────────────────────────────────
-      SERVER_URL: ${EVOLUTION_BASE_URL:-http://localhost:8080}
+      # PUBLIC url of Evolution (what a browser would use). Deliberately NOT
+      # EVOLUTION_BASE_URL, which is the internal URL n8n uses.
+      SERVER_URL: ${EVOLUTION_SERVER_URL:-http://localhost:8080}
       SERVER_TYPE: http
       SERVER_PORT: 8080
       CORS_ORIGIN: "*"
       CORS_METHODS: "POST,GET,PUT,DELETE"
       CORS_CREDENTIALS: "true"
       # ── Logging ───────────────────────────────────────────────
-      LOG_LEVEL: "ERROR,WARN,DEBUG,INFO,LOG,VERBOSE,DARK,WEBHOOKS"
+      LOG_LEVEL: "ERROR,WARN,INFO,LOG,WEBHOOKS"
       LOG_COLOR: "true"
       LOG_BAILEYS: "error"
       # ── Instance management ───────────────────────────────────
       DEL_INSTANCE: "false"
       # ── Database (Evolution API v2 uses DATABASE_PROVIDER + URI)
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: "postgresql://${POSTGRES_USER:-wauser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-waassistant}?schema=public"
+      # Own schema ("evolution"): n8n and our app tables already live in "public", and
+      # Evolution's Prisma migrations must not run against a non-empty schema.
+      # (Passwords are used inside this URL -> use letters/digits only, see .env.example.)
+      DATABASE_CONNECTION_URI: "postgresql://${POSTGRES_USER:-wauser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-waassistant}?schema=evolution"
       DATABASE_CONNECTION_CLIENT_NAME: evolution
       DATABASE_SAVE_DATA_INSTANCE: "true"
       DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
@@ -169,10 +179,16 @@ services:
       CACHE_REDIS_SAVE_INSTANCES: "false"
       CACHE_LOCAL_ENABLED: "false"
       # ── Global webhook → n8n ──────────────────────────────────
-      # Uses internal Docker network name (n8n container), NOT localhost
-      WEBHOOK_GLOBAL_URL: "http://n8n:5678/webhook/whatsapp"
+      # Uses internal Docker network name (n8n container), NOT localhost.
+      # ?secret= is verified by the workflow's "Validate & Extract" node.
+      WEBHOOK_GLOBAL_URL: "http://n8n:5678/webhook/whatsapp?secret=${WEBHOOK_SECRET}"
       WEBHOOK_GLOBAL_ENABLED: "true"
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
+      # Each event must be switched on explicitly, otherwise the global webhook
+      # never fires and the bot never sees a message.
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
+      WEBHOOK_EVENTS_CONNECTION_UPDATE: "true"
+      WEBHOOK_EVENTS_QRCODE_UPDATED: "true"
       # ── Authentication (v2 uses AUTHENTICATION_API_KEY) ───────
       AUTHENTICATION_TYPE: apikey
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}

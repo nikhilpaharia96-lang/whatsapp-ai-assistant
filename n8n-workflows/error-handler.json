@@ -9,7 +9,8 @@
       "position": [
         60,
         300
-      ]
+      ],
+      "parameters": {}
     },
     {
       "id": "log_error",
@@ -23,8 +24,8 @@
       "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO audit_log (event_type, phone, payload)\nVALUES ('workflow_error', NULL, $1::jsonb);",
-        "additionalFields": {
-          "queryParams": "={{ [JSON.stringify({\n  workflow: $json.workflow?.name,\n  node: $json.execution?.lastNodeExecuted,\n  error: $json.execution?.error?.message,\n  timestamp: new Date().toISOString()\n})] }}"
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify({\n  workflow: $('Error Trigger').first().json.workflow?.name,\n  node: $('Error Trigger').first().json.execution?.lastNodeExecuted,\n  error: $('Error Trigger').first().json.execution?.error?.message,\n  executionId: $('Error Trigger').first().json.execution?.id,\n  timestamp: new Date().toISOString()\n})] }}"
         }
       },
       "credentials": {
@@ -32,7 +33,8 @@
           "id": "postgres_main",
           "name": "PostgreSQL"
         }
-      }
+      },
+      "alwaysOutputData": true
     },
     {
       "id": "alert_error",
@@ -45,23 +47,25 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE_NAME || 'default' }}",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ encodeURIComponent($env.EVOLUTION_INSTANCE_NAME || 'default') }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "apikey",
               "value": "={{ $env.EVOLUTION_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
             }
           ]
         },
         "sendBody": true,
-        "jsonBody": "={\n  \"number\": \"{{ $env.ESCALATION_PHONE }}\",\n  \"text\": \"⚠️ *System Error*\\nWorkflow: {{ $json.workflow?.name }}\\nError: {{ $json.execution?.error?.message }}\"\n}"
-      }
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  number: String($env.ESCALATION_PHONE || '').replace(/\\D/g, ''),\n  text: '⚠️ *System Error*\\nWorkflow: ' + ($('Error Trigger').first().json.workflow?.name || 'unknown')\n    + '\\nNode: ' + ($('Error Trigger').first().json.execution?.lastNodeExecuted || 'unknown')\n    + '\\nError: ' + ($('Error Trigger').first().json.execution?.error?.message || 'unknown')\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -87,5 +91,8 @@
         ]
       ]
     }
+  },
+  "settings": {
+    "executionOrder": "v1"
   }
 }

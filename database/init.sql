@@ -6,6 +6,10 @@
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- Evolution API keeps its own tables in a separate schema (see DATABASE_CONNECTION_URI
+-- in docker-compose.yml) so its Prisma migrations never collide with n8n / our tables.
+CREATE SCHEMA IF NOT EXISTS evolution;
+
 -- ─── contacts ────────────────────────────────────────────────
 -- Stores every phone number the assistant has talked to.
 -- contact_type drives the tone selection in the AI node.
@@ -74,6 +78,8 @@ CREATE TABLE IF NOT EXISTS portfolio (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+-- Unique key so the seed below (ON CONFLICT DO NOTHING) is safe to re-run
+CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_category_title ON portfolio(category, title);
 CREATE INDEX IF NOT EXISTS idx_portfolio_category ON portfolio(category) WHERE is_active = TRUE;
 CREATE INDEX IF NOT EXISTS idx_portfolio_tags      ON portfolio USING GIN(tags);
 
@@ -86,7 +92,7 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     PRIMARY KEY (phone, window_start)
 );
 
--- Auto-clean old rate limit windows (older than 2 hours)
+-- Old windows (> 2 hours) are deleted by the "Rate Limit Check" node on every message.
 CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);
 
 -- ─── audit_log ───────────────────────────────────────────────
