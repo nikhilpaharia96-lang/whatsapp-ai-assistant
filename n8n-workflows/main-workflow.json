@@ -310,35 +310,15 @@
     {
       "id": "node_gemini",
       "name": "Gemini AI Response",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         2300,
         540
       ],
       "parameters": {
-        "method": "POST",
-        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $env.GEMINI_MODEL || 'gemini-3.8-flash' }}:generateContent",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-goog-api-key",
-              "value": "={{ $env.GEMINI_API_KEY }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "json",
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.geminiBody) }}",
-        "options": {
-          "timeout": 60000
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 3000
+        "jsCode": "// ── Call Gemini with rate-limit handling ──\n// - waits for the delay Gemini asks for (RetryInfo.retryDelay) instead of hammering it\n// - exponential backoff otherwise, with a total waiting budget (GEMINI_MAX_WAIT_SECONDS)\n// - daily quota exhausted / model gone  -> immediately try the next model in GEMINI_FALLBACK_MODELS\n// - bad request / invalid key           -> fail fast with a readable message\nconst req = $input.first().json;\nconst key = $env.GEMINI_API_KEY;\nif (!key) throw new Error('GEMINI_API_KEY is not set');\n\nconst base = ($env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\\/$/, '');\nconst primary = $env.GEMINI_MODEL || 'gemini-3.8-flash';\nconst fallbacks = String($env.GEMINI_FALLBACK_MODELS || '').split(',').map(s => s.trim()).filter(Boolean);\nconst models = [...new Set([primary, ...fallbacks])];\nconst budgetMs = (Number($env.GEMINI_MAX_WAIT_SECONDS) || 50) * 1000;\nconst MAX_TRIES_PER_MODEL = 4;\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nconst started = Date.now();\nconst log = [];\n\nconst statusOf = e => {\n  const s = Number(e?.httpCode ?? e?.statusCode ?? e?.response?.status ?? e?.cause?.response?.status ?? e?.cause?.status);\n  if (s) return s;\n  const m = String(e?.message || '').match(/\\b([45]\\d\\d)\\b/);\n  return m ? Number(m[1]) : 0;\n};\nconst blobOf = e => {\n  const parts = [e?.message, e?.description, e?.cause?.response?.data, e?.cause?.response?.body, e?.response?.data, e?.response?.body, e?.context];\n  return parts.map(p => (typeof p === 'string' ? p : p ? JSON.stringify(p) : '')).join(' ');\n};\n\nfor (const model of models) {\n  for (let attempt = 1; attempt <= MAX_TRIES_PER_MODEL; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'POST',\n        url: `${base}/models/${encodeURIComponent(model)}:generateContent`,\n        headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },\n        body: req.geminiBody,\n        json: true,\n        timeout: 60000,\n      });\n      return [{ json: { ...res, usedModel: model } }];\n    } catch (e) {\n      const status = statusOf(e);\n      const blob = blobOf(e);\n      log.push(`${model}#${attempt}: ${status || 'error'}`);\n\n      if (status === 404) break;                                   // model retired/unknown -> next model\n      if (status === 429 && /PerDay|per day|daily/i.test(blob)) break; // daily quota gone -> next model\n      const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 0;\n      if (!retryable) {\n        throw new Error(`Gemini ${model} failed (${status}): ${blob.slice(0, 300)}`);\n      }\n      if (attempt === MAX_TRIES_PER_MODEL) break;\n\n      const asked = blob.match(/\"?retryDelay\"?\\s*[:=]\\s*\"?(\\d+(?:\\.\\d+)?)s/i);\n      const waitMs = asked\n        ? Math.ceil(Number(asked[1]) * 1000) + 250\n        : Math.min(2000 * 2 ** (attempt - 1), 20000) + Math.floor(Math.random() * 500);\n      if (Date.now() - started + waitMs > budgetMs) break;           // out of waiting budget -> next model\n      await sleep(waitMs);\n    }\n  }\n}\nthrow new Error(\n  `Gemini is rate-limiting / unavailable for all models (${models.join(', ')}). Tried: ${log.join(', ')}. ` +\n  'Wait a minute, lower traffic, set GEMINI_FALLBACK_MODELS, or enable billing in Google AI Studio.'\n);"
+      }
     },
     {
       "id": "node_parse_ai",
@@ -350,7 +330,7 @@
         540
       ],
       "parameters": {
-        "jsCode": "// ── Parse Gemini response, detect escalation, split into WhatsApp-sized chunks ──\nconst res = $input.first().json;\nconst candidate = res.candidates?.[0];\nconst aiRaw = (candidate?.content?.parts || [])\n  .filter(p => !p.thought)\n  .map(p => p.text || '')\n  .join('')\n  .trim();\n\nif (!aiRaw) {\n  const why = res.promptFeedback?.blockReason || candidate?.finishReason || 'unknown';\n  throw new Error(`Gemini returned no text (reason: ${why})`);\n}\n\nconst usage = res.usageMetadata || {};\nconst tokensUsed = usage.totalTokenCount ||\n  ((usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0));\n\nconst { geminiBody, ...ctx } = $('Build AI Prompt').first().json;\n\n// Escalation block: [ESCALATE:{\"reason\":\"...\",\"urgency\":\"high\"}]\nconst escalateMatch = aiRaw.match(/\\[ESCALATE:(\\{.*?\\})\\]/s);\nconst needsEscalation = !!escalateMatch;\nlet escalationData = null;\nif (escalateMatch) {\n  try { escalationData = JSON.parse(escalateMatch[1]); } catch (e) {}\n}\n\n// User-facing reply = AI text without the escalation block\nconst cleanReply = aiRaw.replace(/\\[ESCALATE:\\{.*?\\}\\]/s, '').trim();\nif (!cleanReply) {\n  throw new Error('Gemini reply was empty after removing the escalation block');\n}\n\n// Split long replies into chunks (WhatsApp-friendly, ~1500 chars)\nconst MAX_LEN = 1500;\nconst pieces = [];\nfor (let p of cleanReply.split(/\\n\\n+/)) {\n  while (p.length > MAX_LEN) {\n    let cut = p.lastIndexOf(' ', MAX_LEN);\n    if (cut < MAX_LEN / 2) cut = MAX_LEN;\n    pieces.push(p.slice(0, cut).trim());\n    p = p.slice(cut).trim();\n  }\n  if (p) pieces.push(p);\n}\nconst chunks = [];\nlet current = '';\nfor (const p of pieces) {\n  if (current && (current + '\\n\\n' + p).length > MAX_LEN) {\n    chunks.push(current);\n    current = p;\n  } else {\n    current = current ? current + '\\n\\n' + p : p;\n  }\n}\nif (current) chunks.push(current);\n\nconst model = $env.GEMINI_MODEL || 'gemini-3.8-flash';\n\n// One item per chunk -> 'Send WhatsApp Reply' sends every chunk, in order\nreturn chunks.map((chunk, i) => ({\n  json: {\n    ...ctx,\n    aiReply: cleanReply,\n    chunk,\n    chunkIndex: i,\n    chunkCount: chunks.length,\n    tokensUsed,\n    model,\n    needsEscalation,\n    escalationData\n  }\n}));"
+        "jsCode": "// ── Parse Gemini response, detect escalation, split into WhatsApp-sized chunks ──\nconst res = $input.first().json;\nconst candidate = res.candidates?.[0];\nconst aiRaw = (candidate?.content?.parts || [])\n  .filter(p => !p.thought)\n  .map(p => p.text || '')\n  .join('')\n  .trim();\n\nif (!aiRaw) {\n  const why = res.promptFeedback?.blockReason || candidate?.finishReason || 'unknown';\n  throw new Error(`Gemini returned no text (reason: ${why})`);\n}\n\nconst usage = res.usageMetadata || {};\nconst tokensUsed = usage.totalTokenCount ||\n  ((usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0));\n\nconst { geminiBody, ...ctx } = $('Build AI Prompt').first().json;\n\n// Escalation block: [ESCALATE:{\"reason\":\"...\",\"urgency\":\"high\"}]\nconst escalateMatch = aiRaw.match(/\\[ESCALATE:(\\{.*?\\})\\]/s);\nconst needsEscalation = !!escalateMatch;\nlet escalationData = null;\nif (escalateMatch) {\n  try { escalationData = JSON.parse(escalateMatch[1]); } catch (e) {}\n}\n\n// User-facing reply = AI text without the escalation block\nconst cleanReply = aiRaw.replace(/\\[ESCALATE:\\{.*?\\}\\]/s, '').trim();\nif (!cleanReply) {\n  throw new Error('Gemini reply was empty after removing the escalation block');\n}\n\n// Split long replies into chunks (WhatsApp-friendly, ~1500 chars)\nconst MAX_LEN = 1500;\nconst pieces = [];\nfor (let p of cleanReply.split(/\\n\\n+/)) {\n  while (p.length > MAX_LEN) {\n    let cut = p.lastIndexOf(' ', MAX_LEN);\n    if (cut < MAX_LEN / 2) cut = MAX_LEN;\n    pieces.push(p.slice(0, cut).trim());\n    p = p.slice(cut).trim();\n  }\n  if (p) pieces.push(p);\n}\nconst chunks = [];\nlet current = '';\nfor (const p of pieces) {\n  if (current && (current + '\\n\\n' + p).length > MAX_LEN) {\n    chunks.push(current);\n    current = p;\n  } else {\n    current = current ? current + '\\n\\n' + p : p;\n  }\n}\nif (current) chunks.push(current);\n\nconst model = res.usedModel || $env.GEMINI_MODEL || 'gemini-3.8-flash';\n\n// One item per chunk -> 'Send WhatsApp Reply' sends every chunk, in order\nreturn chunks.map((chunk, i) => ({\n  json: {\n    ...ctx,\n    aiReply: cleanReply,\n    chunk,\n    chunkIndex: i,\n    chunkCount: chunks.length,\n    tokensUsed,\n    model,\n    needsEscalation,\n    escalationData\n  }\n}));"
       }
     },
     {

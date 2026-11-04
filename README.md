@@ -222,6 +222,12 @@ docker compose --env-file ..\.env down -v
   List the models your key can use:
   `curl -H "x-goog-api-key: $GEMINI_API_KEY" https://generativelanguage.googleapis.com/v1beta/models`
 
+**"The service is receiving too many requests from you" (Gemini 429)**
+- You hit Google's rate limit (free-tier quotas are small and per model). The workflow now waits the delay Gemini
+  asks for and retries, then tries `GEMINI_FALLBACK_MODELS`. Fixes: wait a minute, set one or two fallback models,
+  lower `RATE_LIMIT_PER_HOUR`, or enable billing in Google AI Studio for higher limits.
+- Don't run `scripts/test.sh` repeatedly; Test 7 makes a real Gemini call each time.
+
 **Bot never answers (nothing in n8n → Executions)**
 - Check the instance is connected (`/manager`) and that `WEBHOOK_EVENTS_MESSAGES_UPSERT` is `true` for Evolution.
 - The webhook URL carries `?secret=<WEBHOOK_SECRET>`; if you changed the secret, recreate **both** containers.
