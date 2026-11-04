@@ -4,6 +4,7 @@ A self-hosted WhatsApp AI assistant powered by **Google Gemini**, **n8n**, and *
 
 > New here? Read **[docs/GUIDE.md](docs/GUIDE.md)** (Hinglish): what this project does, how a message flows
 > through it, and how to customize contacts, tone and portfolio.
+> Want to host it for free? See **[docs/DEPLOY-ORACLE.md](docs/DEPLOY-ORACLE.md)** (Oracle Cloud Always Free).
 
 ---
 

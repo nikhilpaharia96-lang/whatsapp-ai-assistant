@@ -68,7 +68,9 @@ services:
     container_name: wa_n8n
     restart: unless-stopped
     ports:
-      - "5678:5678"
+      # Bound to localhost only: reach it via SSH tunnel (see docs/DEPLOY-ORACLE.md).
+      # Set BIND_ADDR=0.0.0.0 in .env only if you really want it public.
+      - "${BIND_ADDR:-127.0.0.1}:5678:5678"
     environment:
       # ── Database ──────────────────────────────────────────────
       DB_TYPE: postgresdb
@@ -141,7 +143,7 @@ services:
     container_name: wa_evolution
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"
     environment:
       # ── Server ────────────────────────────────────────────────
       # PUBLIC url of Evolution (what a browser would use). Deliberately NOT
