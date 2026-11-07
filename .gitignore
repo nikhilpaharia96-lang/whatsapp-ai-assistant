@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!.env.railway.example
 config/ssl/*.pem
 config/ssl/*.key
 node_modules/
