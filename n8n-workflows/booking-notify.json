@@ -1,0 +1,415 @@
+{
+  "name": "Booking Confirmed → WhatsApp (from portfolio)",
+  "nodes": [
+    {
+      "id": "bk_webhook",
+      "name": "Booking Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "booking-confirmed",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "166677e0-3f67-4bdb-8551-b9f46e42514f"
+    },
+    {
+      "id": "bk_prepare",
+      "name": "Verify & Build Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// ── Verify-prep + message builder for \"booking.confirmed\" events sent by the portfolio site ──\n// The HMAC itself is computed by the next (Crypto) node; this node checks freshness/shape and builds\n// the exact string that was signed: `${timestamp}.${rawBody}`. (JSON.stringify(parsed body) is\n// byte-identical to the compact JSON the site sent.)\nconst input = $input.first().json;\nconst headers = input.headers || {};\nconst body = input.body || {};\nconst fail = (reason) => [{ json: { ok: false, reason } }];\n\nconst secret = String($env.BOOKING_WEBHOOK_SECRET || '');\nif (secret.length < 16) return fail('not_configured');\n\nconst ts = String(headers['x-booking-timestamp'] || '');\nconst receivedSig = String(headers['x-booking-signature'] || '');\nconst tsMs = Number(ts);\nif (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > 5 * 60 * 1000) return fail('stale_or_missing_timestamp');\nif (!/^sha256=[0-9a-f]{64}$/.test(receivedSig)) return fail('bad_signature_format');\n\nconst b = body.booking || {};\nif (body.event !== 'booking.confirmed' || !/^\\+91[6-9]\\d{9}$/.test(String(b.phone || '')) || !b.ref || !b.paymentId) {\n  return fail('bad_payload');\n}\n\nconst inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');\nconst line = (s, max) => String(s || '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, max);\nconst yourName = $env.YOUR_NAME || 'Nikhil';\nconst name = line(b.name, 60);\nconst company = line(b.company, 60);\nconst service = line(b.service, 80);\nconst first = name.split(' ')[0] || 'there';\n\nconst text = [\n  `Hi ${first}, this is ${yourName}'s booking assistant 🤖`,\n  '',\n  `Your booking for *${service}*${company ? ` (${company})` : ''} is confirmed ✅ (Ref: ${b.ref})`,\n  '',\n  `*Project total:* ${inr(b.total)}`,\n  `• Paid now (${b.tokenPercent}%): ${inr(b.token)} ✅`,\n  `• At project start (${b.startPercent}%): ${inr(b.startAdvance)}`,\n  `• After completion (${b.remainingPercent}%): ${inr(b.remaining)}`,\n  ...(b.startDate ? ['', `Preferred start date: ${line(b.startDate, 10)}`] : []),\n  '',\n  `${yourName} will personally contact you soon to go through your requirements. You can reply here with any questions in the meantime.`\n].join('\\n');\n\n// Single-line, structured facts only. This goes into the AI's \"Notes\" — never free text from the client.\nconst notes = `Booking ${b.ref}: ${service}, total ${inr(b.total)}; token ${inr(b.token)} paid; ${inr(b.startAdvance)} due at project start; ${inr(b.remaining)} due after completion.${b.startDate ? ` Preferred start ${line(b.startDate, 10)}.` : ''}`;\n\nreturn [{\n  json: {\n    ok: true,\n    signedString: `${ts}.${JSON.stringify(body)}`,\n    receivedSig,\n    phone: b.phone,\n    name,\n    ref: b.ref,\n    paymentId: String(b.paymentId),\n    resend: body.resend === true,\n    text,\n    notes,\n    instanceName: $env.EVOLUTION_INSTANCE_NAME || 'default'\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "bk_ok",
+      "name": "Payload OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bk_ok-cond",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "bk_hmac",
+      "name": "Compute HMAC",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        720,
+        220
+      ],
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.signedString }}",
+        "dataPropertyName": "expectedSig",
+        "secret": "={{ $env.BOOKING_WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "bk_sig",
+      "name": "Signature valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        220
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bk_sig-cond",
+              "leftValue": "={{ $json.receivedSig === 'sha256=' + $json.expectedSig }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "bk_upsert",
+      "name": "Upsert Client Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1160,
+        140
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (phone, display_name, contact_type, notes, last_active)\nVALUES ($1, NULLIF($2, ''), 'client', $3, NOW())\nON CONFLICT (phone) DO UPDATE SET\n  last_active  = NOW(),\n  display_name = COALESCE(contacts.display_name, EXCLUDED.display_name),\n  -- keep your own friend/family classification; everyone else who books is a client\n  contact_type = CASE WHEN contacts.contact_type IN ('friend','family')\n                      THEN contacts.contact_type ELSE 'client' END,\n  notes        = RIGHT(COALESCE(contacts.notes || E'\\n', '') || EXCLUDED.notes, 1500)\nRETURNING id, is_blocked;",
+        "options": {
+          "queryReplacement": "={{ [$('Verify & Build Message').first().json.phone, $('Verify & Build Message').first().json.name, $('Verify & Build Message').first().json.notes] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "id": "bk_blocked",
+      "name": "Blocked contact?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1380,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bk_blocked-cond",
+              "leftValue": "={{ $json.is_blocked }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "bk_send",
+      "name": "Send Booking WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ encodeURIComponent($('Verify & Build Message').first().json.instanceName) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('Verify & Build Message').first().json.phone.replace(/\\D/g, ''), text: $('Verify & Build Message').first().json.text, delay: 1200 }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      }
+    },
+    {
+      "id": "bk_save",
+      "name": "Save to Conversation History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1820,
+        220
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (contact_id, role, content, wa_message_id)\nVALUES ($1, 'assistant', $2, $3)\nON CONFLICT DO NOTHING;",
+        "options": {
+          "queryReplacement": "={{ [$('Upsert Client Contact').first().json.id, $('Verify & Build Message').first().json.text, 'booking:' + $('Verify & Build Message').first().json.paymentId + ($('Verify & Build Message').first().json.resend ? ':' + Date.now() : '')] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bk_resp_ok",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2040,
+        220
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "bk_resp_blocked",
+      "name": "Respond 200 (blocked)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        60
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, skipped: 'blocked' }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "bk_resp_bad",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Booking Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify & Build Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify & Build Message": {
+      "main": [
+        [
+          {
+            "node": "Payload OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payload OK?": {
+      "main": [
+        [
+          {
+            "node": "Compute HMAC",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute HMAC": {
+      "main": [
+        [
+          {
+            "node": "Signature valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature valid?": {
+      "main": [
+        [
+          {
+            "node": "Upsert Client Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Client Contact": {
+      "main": [
+        [
+          {
+            "node": "Blocked contact?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Blocked contact?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (blocked)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Booking WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Booking WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Save to Conversation History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Conversation History": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    "whatsapp",
+    "booking",
+    "production"
+  ]
+}

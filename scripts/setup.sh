@@ -65,7 +65,7 @@ else
 fi
 
 # ── 2. Generate random secrets (letters/digits only: they end up inside URLs) ──
-for pair in "POSTGRES_PASSWORD:16" "REDIS_PASSWORD:16" "N8N_ENCRYPTION_KEY:32" "EVOLUTION_API_KEY:24" "WEBHOOK_SECRET:16"; do
+for pair in "POSTGRES_PASSWORD:16" "REDIS_PASSWORD:16" "N8N_ENCRYPTION_KEY:32" "EVOLUTION_API_KEY:24" "WEBHOOK_SECRET:16" "BOOKING_WEBHOOK_SECRET:24"; do
   KEY="${pair%%:*}"; BYTES="${pair##*:}"
   if is_placeholder "$(get_env "$KEY")"; then
     set_env "$KEY" "$(random_hex "$BYTES")"

@@ -127,6 +127,8 @@ services:
       FRIEND_NUMBERS: ${FRIEND_NUMBERS:-}
       RATE_LIMIT_PER_HOUR: ${RATE_LIMIT_PER_HOUR:-20}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      # Shared with the portfolio site (N8N_BOOKING_WEBHOOK_SECRET) — signs booking-confirmed webhooks
+      BOOKING_WEBHOOK_SECRET: ${BOOKING_WEBHOOK_SECRET:-}
     volumes:
       - n8n_data:/home/node/.n8n
       - ../n8n-workflows:/workflows:ro
