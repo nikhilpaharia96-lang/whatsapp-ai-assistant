@@ -19,6 +19,8 @@ the notes as data (not instructions) and escalates refund / payment / scope ques
 ## Setup (≈10 min)
 1. `git pull`, then set `BOOKING_WEBHOOK_SECRET` in `.env` (re-running `bash scripts/setup.sh` generates one
    if it is still the placeholder). Restart: `docker compose up -d`.
+   **Railway:** add `BOOKING_WEBHOOK_SECRET=<24+ random letters/digits>` to the **n8n** service's Variables
+   (it is listed in `.env.railway.example`), then redeploy that service. Your n8n public domain is the host in step 3.
 2. n8n UI → **Import from file** → `n8n-workflows/booking-notify.json` → select your *PostgreSQL* credential on
    both Postgres nodes → **Publish/Activate**.
 3. On the portfolio's hosting (Vercel → Environment Variables) set
