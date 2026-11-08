@@ -38,14 +38,10 @@ INSERT INTO portfolio (category, title, content, tags) VALUES
 ON CONFLICT (category, title) DO UPDATE
   SET content = EXCLUDED.content, tags = EXCLUDED.tags, is_active = TRUE, updated_at = NOW();
 
--- 3) Your current status (optional). Keep it TRUE and keep it fresh; the AI repeats it
---    to friends/family. Edit the text, then run just this block whenever it changes:
--- INSERT INTO portfolio (category, title, content)
--- VALUES ('status', 'Right now', 'Busy with college till 4 pm, free in the evening.')
--- ON CONFLICT (category, title) DO UPDATE
---   SET content = EXCLUDED.content, is_active = TRUE, updated_at = NOW();
---
--- To clear it:  UPDATE portfolio SET is_active = FALSE WHERE category = 'status';
+-- 3) Your current status is NOT set here any more: send "STATUS: College mein hu | 3h" from
+--    your own WhatsApp (see docs/STATUS.md). It is stored as the portfolio row
+--    category='status', title='Right now'. To clear it from SQL:
+--      UPDATE portfolio SET is_active = FALSE WHERE category = 'status';
 
 -- 4) Per-person notes (who they are, how to talk to them). Example:
 -- UPDATE contacts

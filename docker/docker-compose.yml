@@ -127,6 +127,9 @@ services:
       FRIEND_NUMBERS: ${FRIEND_NUMBERS:-}
       RATE_LIMIT_PER_HOUR: ${RATE_LIMIT_PER_HOUR:-20}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      # WhatsApp "STATUS: ..." command (docs/STATUS.md)
+      STATUS_OWNER_NUMBERS: ${STATUS_OWNER_NUMBERS:-}
+      STATUS_DEFAULT_TTL_HOURS: ${STATUS_DEFAULT_TTL_HOURS:-12}
       # Shared with the portfolio site (N8N_BOOKING_WEBHOOK_SECRET) — signs booking-confirmed webhooks
       BOOKING_WEBHOOK_SECRET: ${BOOKING_WEBHOOK_SECRET:-}
     volumes:
