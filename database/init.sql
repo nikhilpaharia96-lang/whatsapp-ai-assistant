@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     phone           VARCHAR(30)  NOT NULL UNIQUE,   -- E.164 format: +1234567890
     display_name    VARCHAR(120),
     contact_type    VARCHAR(20)  NOT NULL DEFAULT 'unknown'
-                    CHECK (contact_type IN ('friend','family','client','unknown')),
+                    CHECK (contact_type IN ('friend','family','client','teacher','unknown')),
     tone_override   VARCHAR(40),                     -- NULL = use type default
     is_blocked      BOOLEAN      NOT NULL DEFAULT FALSE,
     notes           TEXT,                            -- private notes about this contact

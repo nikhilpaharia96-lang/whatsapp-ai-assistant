@@ -4,7 +4,8 @@
 --
 --  Who sees what (decided in the "Build AI Prompt" node):
 --    profile_public   -> everyone
---    profile_personal -> friends and family only
+--    profile_academic -> friends, family and teachers (college, hometown)
+--    profile_personal -> friends and family only (goals)
 --    status           -> friends and family only (see the bottom of this file)
 --    other categories -> clients only
 -- ============================================================
@@ -18,6 +19,9 @@ WHERE (category, title) IN (
   ('pricing','Rates and availability'), ('process','How I work')
 );
 
+-- (If an earlier version of this file already ran, move that row to its new category first.)
+UPDATE portfolio SET category = 'profile_academic' WHERE category = 'profile_personal' AND title = 'Background';
+
 -- 2) Real profile
 INSERT INTO portfolio (category, title, content, tags) VALUES
 ('profile_public', 'Who you are',
@@ -29,7 +33,7 @@ INSERT INTO portfolio (category, title, content, tags) VALUES
 ('profile_public', 'Projects',
  'ApunBazar (Assam-focused e-commerce platform), StudyNova (AI-powered learning platform), CreatorHub (digital products marketplace), a WhatsApp AI Assistant, a personal portfolio and brand, and a website for Gopal Krishna Tea. Also takes freelance website projects.',
  ARRAY['projects','work']),
-('profile_personal', 'Background',
+('profile_academic', 'Background',
  'Hometown: Jagiroad / Morigaon, Assam. Studies BSc Chemistry (3rd semester) at Jagiroad College (Autonomous), affiliated with Gauhati University.',
  ARRAY['education','home']),
 ('profile_personal', 'Goals',
