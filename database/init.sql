@@ -179,3 +179,12 @@ FROM escalations e
 JOIN contacts c ON c.id = e.contact_id
 WHERE e.status = 'pending'
 ORDER BY e.created_at ASC;
+
+-- ─── bot_settings ────────────────────────────────────────────
+-- Owner switch: "BOT OFF" / "BOT ON" in the self-chat sets key 'autoreply' to 'off' / 'on'.
+-- No row = on. Safe to run on an existing database.
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

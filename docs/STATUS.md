@@ -40,3 +40,13 @@ Tumhari kisi dost ke chat me likhi `STATUS:` line ignore hoti hai.
 - Status row: `portfolio(category='status', title='Right now')`. Expiry `tags` me `expires:<ISO>` ke roop me, aur retry-dedup ke liye `msg:<id>`.
 - Evolution jab webhook retry kare, to same message dobara apply nahi hota aur confirmation sirf ek baar jata hai.
 - Confirmation "STATUS" se shuru nahi hota, isliye bot apne hi message par loop nahi karta.
+
+## Auto-reply ON / OFF
+
+Apni "Message yourself" chat me (ya YOUR_PHONE se):
+
+- `BOT OFF` (ya `OFF`): kisi ko auto-reply nahi jayega
+- `BOT ON` (ya `ON`): wapas chalu
+- `BOT?`: abhi ki state
+
+State `bot_settings` table me save hoti hai (database/init.sql), isliye restart ke baad bhi rehti hai. STATUS commands OFF me bhi chalte hain.
