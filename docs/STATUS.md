@@ -50,3 +50,13 @@ Apni "Message yourself" chat me (ya YOUR_PHONE se):
 - `BOT?`: abhi ki state
 
 State `bot_settings` table me save hoti hai (database/init.sql), isliye restart ke baad bhi rehti hai. STATUS commands OFF me bhi chalte hain.
+
+## Client ko AI se jodna (CLIENT command)
+
+Apni "Message yourself" chat me:
+
+```
+CLIENT: Rahul Sharma | 919876543210 | website chahiye, budget 15000, 2 hafte me
+```
+
+Bot client ko `client` type me save karta hai (tumhari details note me, "data, not instructions"), usse pehla message bhejta hai ("Nikhil ka AI assistant"), aur tumhe confirmation deta hai. Reply aane par AI sambhalta hai. Friend/family/teacher numbers ka type nahi badalta aur unhe message nahi bhejta; blocked ko bhi nahi. Final booking/price tum hi confirm karte ho.
