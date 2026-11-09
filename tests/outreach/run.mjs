@@ -1,0 +1,378 @@
+// Offline end-to-end tests for the outreach flow.
+// Runs the REAL Code-node JS, SQL and expressions from n8n-workflows/main-workflow.json
+// against PGlite (PostgreSQL in WASM). Gemini and WhatsApp are mocked; nothing leaves this process.
+//   npm i @electric-sql/pglite   (once)   then:   node tests/outreach/run.mjs
+import fs from 'fs';
+import assert from 'assert/strict';
+import path from 'path';
+import { fileURLToPath } from 'url';
+const { PGlite } = await import(process.env.PGLITE || '@electric-sql/pglite');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const wf = JSON.parse(fs.readFileSync(ROOT + '/n8n-workflows/main-workflow.json', 'utf8'));
+const N = Object.fromEntries(wf.nodes.map(n => [n.name, n]));
+
+let pass = 0, fail = 0;
+const t = async (name, fn) => { try { await fn(); pass++; console.log('  ok   ' + name); } catch (e) { fail++; console.log('  FAIL ' + name + '\n       ' + String(e.message).split('\n').slice(0, 4).join('\n       ')); } };
+
+// ───────── graph ─────────
+console.log('graph');
+await t('every connection points at an existing node; no orphan nodes', () => {
+  const targets = new Set();
+  for (const [src, c] of Object.entries(wf.connections)) {
+    assert.ok(N[src], 'source ' + src);
+    for (const out of c.main) for (const l of out) { assert.ok(N[l.node], 'target ' + l.node); targets.add(l.node); }
+  }
+  const orphans = wf.nodes.filter(n => !targets.has(n.name) && n.name !== 'WhatsApp Webhook').map(n => n.name);
+  assert.deepEqual(orphans, []);
+});
+await t('Parse Status Command no longer goes straight to Save Status', () => {
+  assert.deepEqual(wf.connections['Parse Status Command'].main[0].map(l => l.node), ['Outreach cmd?']);
+});
+await t('no node sends to a client without passing the approval lock', () => {
+  const sendNodes = wf.nodes.filter(n => n.type === 'n8n-nodes-base.httpRequest' && /sendText/.test(n.parameters.url)).map(n => n.name);
+  const into = n => Object.entries(wf.connections).filter(([, c]) => c.main.some(o => o.some(l => l.node === n))).map(([s]) => s);
+  assert.deepEqual(into('Send Outreach'), ['Send now?']);
+  assert.deepEqual(into('Send now?'), ['Outreach Router']);
+  assert.deepEqual(into('Outreach Router'), ['Outreach Decide']);
+  assert.ok(sendNodes.includes('Send Outreach'));
+});
+
+// ───────── runtime harness ─────────
+const strip = s => s.replace(/CREATE SCHEMA IF NOT EXISTS evolution;/, '').replace(/CREATE EXTENSION[^;]*;/, '');
+async function freshDb() {
+  const db = new PGlite();
+  try { await db.exec('CREATE EXTENSION IF NOT EXISTS pgcrypto;'); } catch (e) {}
+  await db.exec(strip(fs.readFileSync(ROOT + '/database/init.sql', 'utf8')));
+  await db.exec(fs.readFileSync(ROOT + '/database/services.sql', 'utf8'));
+  return db;
+}
+const OWNER = '919900000001';
+const ENV = { WEBHOOK_SECRET: 's', YOUR_PHONE: '+' + OWNER };
+const evalExpr = (expr, json, $) => new Function('$json', '$', 'return (' + expr.replace(/^=\{\{\s*/, '').replace(/\s*\}\}$/, '') + ');')(json, $);
+
+function makeFlow(db, mocks = {}) {
+  const outs = {}; const sent = []; let msgSeq = 0;
+  const $ = name => ({ first: () => (outs[name] || [])[0], all: () => outs[name] || [] });
+  const run = (name, items, env = ENV) => {
+    const input = { first: () => items[0], all: () => items };
+    const r = new Function('$input', '$env', '$', 'return (async()=>{' + N[name].parameters.jsCode + '\n})()')(input, env, $);
+    return r;
+  };
+  const sql = async (name, items) => {
+    const params = evalExpr(N[name].parameters.options.queryReplacement, items[0].json, $);
+    const res = await db.query(N[name].parameters.query, params);
+    return res.rows.map(json => ({ json }));
+  };
+  const cond = (name, item) => evalExpr(N[name].parameters.conditions.conditions[0].leftValue, item.json, $) === true;
+  const wa = (name, item) => { const b = JSON.parse(evalExpr(N[name].parameters.jsonBody, item.json, $)); sent.push({ to: b.number, text: b.text }); return b; };
+
+  async function ownerCommand(text, { id = 'MSG' + (++msgSeq) } = {}) {
+    const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'Inst', sender: OWNER + '@s.whatsapp.net',
+      data: { key: { remoteJid: OWNER + '@s.whatsapp.net', fromMe: true, id }, message: { conversation: text }, messageType: 'conversation' } } } };
+    outs['Validate & Extract'] = await run('Validate & Extract', [hook]);
+    if (!outs['Validate & Extract'][0].json.isStatusCommand) return { notCommand: true };
+    outs['Parse Status Command'] = await run('Parse Status Command', outs['Validate & Extract']);
+    const p = outs['Parse Status Command'][0];
+    if (!cond('Outreach cmd?', p)) return { statusPath: true, parsed: p.json };
+    const finish = items => { for (const it of items) wa('Confirm Status to Owner', it); };
+    if (cond('Outreach draft?', p)) {
+      outs['Outreach Check'] = await sql('Outreach Check', [p]);
+      outs['Outreach Gate'] = await run('Outreach Gate', outs['Outreach Check']);
+      const g = outs['Outreach Gate'][0];
+      if (!cond('Gate OK?', g)) { finish(await run('Build Outreach Reply', outs['Outreach Gate'])); return {}; }
+      const res = mocks.gemini ? await mocks.gemini(g.json) : { error: 'no gemini' };
+      outs['Draft Message'] = [{ json: res }];
+      outs['Validate Draft'] = await run('Validate Draft', outs['Draft Message']);
+      outs['Save Draft'] = await sql('Save Draft', outs['Validate Draft']);
+      finish(await run('Build Outreach Reply', outs['Save Draft']));
+      return { draft: outs['Validate Draft'][0].json };
+    }
+    outs['Outreach Decide'] = await sql('Outreach Decide', [p]);
+    outs['Outreach Router'] = await run('Outreach Router', outs['Outreach Decide']);
+    const r = outs['Outreach Router'][0];
+    if (!cond('Send now?', r)) { finish(outs['Outreach Router']); return {}; }
+    const body = wa('Send Outreach', r);
+    const resp = mocks.send ? mocks.send(body) : { key: { id: 'WA-' + body.number } };
+    outs['Send Outreach'] = [{ json: resp }];
+    outs['Mark Sent'] = await sql('Mark Sent', outs['Send Outreach']);
+    finish(await run('Build Outreach Result', outs['Mark Sent']));
+    return { sendAttempt: true };
+  }
+  return { ownerCommand, sent, run, sql, outs, $, clear: () => { sent.length = 0; } };
+}
+const good = (text) => async () => ({ candidates: [{ content: { parts: [{ text }] } }] });
+const GOOD_LEAD = "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant, following up on your website enquiry. What kind of site are you looking for?";
+const toClient = f => f.sent.filter(s => s.to !== OWNER);
+const toOwner = f => f.sent.filter(s => s.to === OWNER);
+const rows = async (db, q, p) => (await db.query(q, p)).rows;
+const code = f => (f.sent.map(s => s.text).join('\n').match(/SEND ([0-9a-f]{5})/) || [])[1];
+
+console.log('draft, approval and idempotency');
+{
+  const db = await freshDb(); const f = makeFlow(db, { gemini: good(GOOD_LEAD) });
+  await t('stranger with no relationship: blocked, nothing stored, nothing sent', async () => {
+    await f.ownerCommand('CLIENT: Rahul | 9876543210 | website chahiye');
+    assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /cold outreach/);
+    assert.equal((await rows(db, 'SELECT COUNT(*)::int n FROM outreach'))[0].n, 0);
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM contacts WHERE phone = '+919876543210'"))[0].n, 0);
+  });
+  f.clear();
+  let c1;
+  await t('CLIENT with relationship creates a DRAFT only; client receives nothing', async () => {
+    await f.ownerCommand('CLIENT: Rahul Sharma | 9876543210 | lead | enquired about a website', { id: 'M-A' });
+    assert.equal(toClient(f).length, 0);
+    c1 = code(f); assert.match(c1, /^[0-9a-f]{5}$/);
+    assert.match(toOwner(f)[0].text, /Draft for Rahul Sharma/); assert.match(toOwner(f)[0].text, /SEND .* EDIT .* SKIP|SEND/s);
+    const r = (await rows(db, 'SELECT status,used_fallback FROM outreach'))[0]; assert.equal(r.status, 'draft'); assert.equal(r.used_fallback, false);
+    const c = (await rows(db, "SELECT contact_type,relationship FROM contacts WHERE phone='+919876543210'"))[0];
+    assert.equal(c.relationship, 'lead');
+  });
+  await t('webhook retry of the same command: no second draft, no second owner message', async () => {
+    f.clear(); await f.ownerCommand('CLIENT: Rahul Sharma | 9876543210 | lead | enquired about a website', { id: 'M-A' });
+    assert.equal(f.sent.length, 0); assert.equal((await rows(db, 'SELECT COUNT(*)::int n FROM outreach'))[0].n, 1);
+  });
+  await t('a new CLIENT command while a draft is pending is blocked', async () => {
+    f.clear(); await f.ownerCommand('CLIENT: Rahul Sharma | 9876543210 | lead | again', { id: 'M-B' });
+    assert.match(toOwner(f)[0].text, /pending/); assert.equal((await rows(db, 'SELECT COUNT(*)::int n FROM outreach'))[0].n, 1);
+  });
+  await t('EDIT changes the draft but still sends nothing', async () => {
+    f.clear(); await f.ownerCommand('EDIT ' + c1 + " Hi Rahul! I'm Nikhil's AI assistant. Quick question about your website enquiry?");
+    assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /Draft update/);
+    assert.match((await rows(db, 'SELECT draft_text FROM outreach'))[0].draft_text, /Quick question/);
+  });
+  await t('SEND sends the (edited) text exactly once, records it, starts the cooldown', async () => {
+    f.clear(); await f.ownerCommand('SEND ' + c1);
+    assert.equal(toClient(f).length, 1); assert.match(toClient(f)[0].text, /Quick question/); assert.equal(toClient(f)[0].to, '919876543210');
+    assert.match(toOwner(f)[0].text, /Bhej diya/);
+    const o = (await rows(db, 'SELECT status,wa_message_id,sent_at FROM outreach'))[0]; assert.equal(o.status, 'sent'); assert.ok(o.sent_at); assert.equal(o.wa_message_id, 'WA-919876543210');
+    assert.ok((await rows(db, "SELECT last_outreach_at FROM contacts WHERE phone='+919876543210'"))[0].last_outreach_at);
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM messages WHERE role='assistant'"))[0].n, 1);
+  });
+  await t('SEND again (retry / double tap): nothing more is sent', async () => {
+    f.clear(); await f.ownerCommand('SEND ' + c1); await f.ownerCommand('SEND');
+    assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /pehle hi bhej diya/);
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM messages WHERE role='assistant'"))[0].n, 1);
+  });
+  await t('14-day cooldown blocks a new draft; it ends after 14 days', async () => {
+    f.clear(); await f.ownerCommand('CLIENT: Rahul Sharma | 9876543210 | lead | again', { id: 'M-C' });
+    assert.match(toOwner(f)[0].text, /cooldown/i);
+    await db.query("UPDATE contacts SET last_outreach_at = NOW() - INTERVAL '15 days'"); await db.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '15 days'");
+    f.clear(); await f.ownerCommand('CLIENT: Rahul Sharma | 9876543210 | lead | again', { id: 'M-D' });
+    assert.match(toOwner(f)[0].text, /Draft for/);
+  });
+  await t('SKIP drops the draft; SEND afterwards sends nothing', async () => {
+    const c = code(f); f.clear(); await f.ownerCommand('SKIP ' + c); await f.ownerCommand('SEND ' + c);
+    assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /Skip/); assert.match(toOwner(f)[1].text, /skip ho chuka/);
+  });
+  await t('plain SEND with no pending draft says so', async () => { f.clear(); await f.ownerCommand('SEND'); assert.match(f.sent[0].text, /Koi pending draft nahi/); });
+}
+
+console.log('limits, expiry, failures');
+{
+  const db = await freshDb(); const f = makeFlow(db, { gemini: good(GOOD_LEAD) });
+  const mk = async (n, id) => { f.clear(); await f.ownerCommand('CLIENT: P' + n + ' | 98000000' + String(n).padStart(2, '0') + ' | lead | x', { id }); return code(f); };
+  await t('daily cap: 10th send works, 11th is blocked and not sent', async () => {
+    for (let i = 1; i <= 9; i++) await db.query("INSERT INTO contacts(phone) VALUES($1)", ['+9170000000' + i]);
+    for (let i = 1; i <= 9; i++) await db.query("INSERT INTO outreach(contact_id,code,status,draft_text,expires_at,sent_at) SELECT id,'old'||$1::text,'sent','x',NOW()+INTERVAL '1 day',NOW() FROM contacts WHERE phone=$2", [i, '+9170000000' + i]);
+    const c10 = await mk(10, 'L10'); f.clear(); await f.ownerCommand('SEND ' + c10); assert.equal(toClient(f).length, 1);
+    const c11 = await mk(11, 'L11'); assert.match(toOwner(f)[0].text, /10\/10|limit/i);
+    f.clear(); await f.ownerCommand('SEND ' + c11); assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /limit/i);
+    assert.equal((await rows(db, "SELECT status FROM outreach WHERE code=$1", [c11]))[0].status, 'draft');
+  });
+  await t('yesterday\'s sends do not count towards today (IST day)', async () => {
+    await db.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '30 hours' WHERE status='sent'");
+    f.clear(); const c = code(f) || (await rows(db, "SELECT code FROM outreach WHERE status='draft'"))[0].code; await f.ownerCommand('SEND ' + c); assert.equal(toClient(f).length, 1);
+  });
+  await t('expired draft cannot be sent; a fresh CLIENT command works again', async () => {
+    const c = await mk(12, 'L12'); await db.query("UPDATE outreach SET expires_at = NOW() - INTERVAL '1 minute' WHERE code=$1", [c]);
+    f.clear(); await f.ownerCommand('SEND ' + c); assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /expire/);
+    f.clear(); await f.ownerCommand('CLIENT: P12 | 9800000012 | lead | x', { id: 'L12b' }); assert.match(toOwner(f)[0].text, /Draft for/);
+    assert.equal((await rows(db, "SELECT status FROM outreach WHERE code=$1", [c]))[0].status, 'expired');
+  });
+  await t('BOT OFF blocks SEND; BOT ON allows it', async () => {
+    const c = code(f); await db.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '30 hours' WHERE status='sent'");
+    await db.query("INSERT INTO bot_settings(key,value) VALUES('autoreply','off')");
+    f.clear(); await f.ownerCommand('SEND ' + c); assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /BOT OFF/);
+    await db.query("UPDATE bot_settings SET value='on'"); f.clear(); await f.ownerCommand('SEND ' + c); assert.equal(toClient(f).length, 1);
+  });
+  await t('failed WhatsApp send: marked failed, no cooldown, can be redrafted', async () => {
+    const f2 = makeFlow(db, { gemini: good(GOOD_LEAD), send: () => ({ error: 'boom' }) });
+    f2.clear(); await f2.ownerCommand('CLIENT: P13 | 9800000013 | lead | x', { id: 'L13' }); const c = code(f2);
+    f2.clear(); await f2.ownerCommand('SEND ' + c); assert.match(toOwner(f2)[0].text, /fail/i);
+    const r = (await rows(db, "SELECT o.status, c.last_outreach_at FROM outreach o JOIN contacts c ON c.id=o.contact_id WHERE o.code=$1", [c]))[0];
+    assert.equal(r.status, 'failed'); assert.equal(r.last_outreach_at, null);
+    f2.clear(); await f2.ownerCommand('CLIENT: P13 | 9800000013 | lead | retry', { id: 'L13b' }); assert.match(toOwner(f2)[0].text, /Draft for/);
+  });
+  await t('two SENDs with one code: the database lets only one lock the draft', async () => {
+    const c = await mk(14, 'L14'); await db.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '30 hours' WHERE status='sent'");
+    const a = await db.query(N['Outreach Decide'].parameters.query, ['outreach_send', c, '', 10, 14]);
+    const b = await db.query(N['Outreach Decide'].parameters.query, ['outreach_send', c, '', 10, 14]);
+    assert.equal(a.rows.filter(r => r.r === 'locked').length, 1); assert.equal(b.rows.filter(r => r.r === 'locked').length, 0);
+  });
+}
+
+console.log('who may be contacted');
+{
+  const db = await freshDb(); const f = makeFlow(db, { gemini: good(GOOD_LEAD) });
+  for (const [ph, nm, ty] of [['+919000000098', 'Zadxx', 'friend'], ['+919000000097', 'Namita', 'family'], ['+919000000001', 'Sir', 'teacher']]) await db.query("INSERT INTO contacts(phone,display_name,contact_type) VALUES($1,$2,$3)", [ph, nm, ty]);
+  for (const [nm, ph, ty] of [['Zadxx', '919000000098', 'friend'], ['Namita', '919000000097', 'family'], ['Sir', '919000000001', 'teacher']]) {
+    await t(ty + ' never gets outreach, even if the owner names a business relationship', async () => {
+      f.clear(); await f.ownerCommand('CLIENT: ' + nm + ' | ' + ph + ' | business contact | hi'); assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, new RegExp(ty));
+      assert.equal((await rows(db, 'SELECT COUNT(*)::int n FROM outreach'))[0].n, 0);
+    });
+  }
+  await t('do_not_contact and blocked contacts are refused', async () => {
+    await db.query("INSERT INTO contacts(phone,display_name,contact_type,do_not_contact) VALUES('+919000000002','Dnc','client',TRUE),('+919000000003','Blk','client',FALSE)");
+    await db.query("UPDATE contacts SET is_blocked=TRUE WHERE phone='+919000000003'");
+    f.clear(); await f.ownerCommand('CLIENT: Dnc | 919000000002 | lead | x'); await f.ownerCommand('CLIENT: Blk | 919000000003 | lead | x');
+    assert.match(toOwner(f)[0].text, /STOP|do_not_contact/); assert.match(toOwner(f)[1].text, /blocked/); assert.equal(toClient(f).length, 0);
+  });
+  await t('someone who messaged first (inbound history) is allowed without a stated relationship', async () => {
+    await db.query("INSERT INTO contacts(phone,display_name) VALUES('+919000000004','Asker')");
+    await db.query("INSERT INTO messages(contact_id,role,content) SELECT id,'user','do you make websites?' FROM contacts WHERE phone='+919000000004'");
+    f.clear(); await f.ownerCommand('CLIENT: Asker | 919000000004 | needs a quote'); assert.match(toOwner(f)[0].text, /Draft for Asker/);
+  });
+  await t('Masoom: colleague relationship set, notes/type/history untouched, not treated as a new prospect', async () => {
+    await db.query("INSERT INTO contacts(phone,display_name,contact_type,notes) VALUES('+919000000099','Masoom','client','Former client and ex-colleague; worked together at an agency.')");
+    await db.query("INSERT INTO messages(contact_id,role,content) SELECT id,'assistant','Earlier booking message' FROM contacts WHERE phone='+919000000099'");
+    const f3 = makeFlow(db, { gemini: async () => ({ error: 'down' }) });
+    f3.clear(); await f3.ownerCommand('CLIENT: Masoom | 919000000099 | colleague | wants to say hi, no sales');
+    const c = (await rows(db, "SELECT * FROM contacts WHERE phone='+919000000099'"))[0];
+    assert.equal(c.relationship, 'colleague'); assert.equal(c.contact_type, 'client'); assert.match(c.notes, /Former client and ex-colleague/); assert.match(c.notes, /no sales/);
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM messages WHERE contact_id=$1", [c.id]))[0].n, 1);
+    const d = (await rows(db, "SELECT kind,used_fallback,draft_text FROM outreach WHERE contact_id=$1", [c.id]))[0];
+    assert.equal(d.kind, 'reconnect'); assert.equal(d.used_fallback, true); assert.doesNotMatch(d.draft_text, /project|enquiry/i);
+  });
+  await t('existing client check-in needs a brief or history', async () => {
+    f.clear(); await f.ownerCommand('CLIENT: Priya | 919000000005 | existing client'); assert.match(toOwner(f)[0].text, /project/i);
+    f.clear(); await f.ownerCommand('CLIENT: Priya | 919000000005 | existing client | website project in progress'); assert.match(toOwner(f)[0].text, /Draft for Priya/);
+  });
+}
+
+console.log('draft quality guard');
+{
+  const BAD = {
+    'free offer': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. We have a free offer on websites this week!",
+    'price': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. Websites start at ₹2,999 for you.",
+    'invented claim': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. Nikhil said he has some ideas for your business.",
+    'no identity': 'Hi Rahul! Hope you are doing well and would like a new website soon.',
+    'link': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. See https://example.com for details.",
+    'too long': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. " + 'We build things. '.repeat(40)
+  };
+  for (const [why, txt] of Object.entries(BAD)) {
+    await t('rejected -> safe template: ' + why, async () => {
+      const db = await freshDb(); const f = makeFlow(db, { gemini: good(txt) });
+      const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | lead | enquiry', { id: 'Q' }); assert.equal(r.draft.usedFallback, true);
+      assert.doesNotMatch(r.draft.draftText, /free|₹|said|https/i); assert.match(r.draft.draftText, /assistant/i);
+    });
+  }
+  await t('claims the owner brief supports are allowed (ideas, price quoted by owner)', async () => {
+    const db = await freshDb();
+    const txt = "Hi! 👋 I'm Nikhil Paharia's AI assistant. Nikhil has some ideas to grow Acoustic Inn's Instagram presence with Reels and Meta Ads. Open to a quick chat?";
+    const f = makeFlow(db, { gemini: good(txt) });
+    const r = await f.ownerCommand('CLIENT: Acoustic Inn | 9876543210 | business contact | business: Acoustic Inn Restaurant; industry: restaurant; Nikhil has ideas for Reels and Meta Ads', { id: 'R1' });
+    assert.equal(r.draft.usedFallback, false);
+    const c = (await rows(db, "SELECT business_name,industry FROM contacts WHERE phone='+919876543210'"))[0]; assert.equal(c.business_name, 'Acoustic Inn Restaurant'); assert.equal(c.industry, 'restaurant');
+  });
+  await t('Gemini outage: owner still gets a safe draft (never an error, never an auto-send)', async () => {
+    const db = await freshDb(); const f = makeFlow(db, { gemini: async () => ({ error: 'HTTP 503' }) });
+    const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | lead | enquiry', { id: 'Q2' });
+    assert.equal(r.draft.usedFallback, true); assert.equal(toClient(f).length, 0); assert.match(toOwner(f)[0].text, /safe template/);
+  });
+  await t('Hinglish preference gives a Hinglish fallback', async () => {
+    const db = await freshDb(); await db.query("INSERT INTO contacts(phone,display_name,preferred_language) VALUES('+919876543210','Rahul','Hinglish')");
+    const f = makeFlow(db, { gemini: async () => ({ error: 'x' }) });
+    const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | colleague | hi', { id: 'Q3' }); assert.match(r.draft.draftText, /Main Nikhil Paharia ka AI assistant/);
+  });
+  await t('Gemini prompt carries language + facts and forbids claims', async () => {
+    const db = await freshDb(); let seen;
+    const f = makeFlow(db, { gemini: async g => { seen = g.geminiBody; return { error: 'x' }; } });
+    await f.ownerCommand('CLIENT: Rahul | 9876543210 | lead | enquiry about site', { id: 'Q4' });
+    const sys = seen.system_instruction.parts[0].text, facts = seen.contents[0].parts[0].text;
+    assert.match(sys, /Hindi, Hinglish, Assamese or English/); assert.match(sys, /Never claim/); assert.match(facts, /OWNER BRIEF.*enquiry about site/); assert.match(facts, /Website Development/);
+  });
+}
+
+console.log('STOP / not interested and prompt');
+{
+  const db = await freshDb(); const f = makeFlow(db);
+  const inbound = async (phone, text, hint = 'unknown') => {
+    const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', data: { key: { remoteJid: phone.slice(1) + '@s.whatsapp.net', fromMe: false, id: 'X' + Math.random() }, pushName: 'P', message: { conversation: text }, messageType: 'conversation' } } } };
+    const v = (await f.run('Validate & Extract', [hook]))[0]; f.outs['Validate & Extract'] = [v];
+    return { v, rows: await f.sql('Load or Create Contact', [v]) };
+  };
+  await t('opt-out phrases detected; normal chat words are not', async () => {
+    for (const s of ['STOP', 'stop.', 'Not interested', 'no thanks', "don't message me", 'mat bhejo', 'interested nahi hu']) assert.equal((await inbound('+911000000001', s)).v.json.optOut, true, s);
+    for (const s of ['stop it bro', 'bus stop pe hu', 'i am interested', 'thanks!', 'okay no problem']) assert.equal((await inbound('+911000000002', s)).v.json.optOut, false, s);
+  });
+  await t('STOP from a client: do_not_contact set, pending draft cancelled, AI told to acknowledge', async () => {
+    await db.query("INSERT INTO contacts(phone,display_name,contact_type) VALUES('+919111111111','Cli','client')");
+    await db.query("INSERT INTO outreach(contact_id,code,status,draft_text,expires_at) SELECT id,'zzzzz','draft','x',NOW()+INTERVAL '1 day' FROM contacts WHERE phone='+919111111111'");
+    const r = await inbound('+919111111111', 'STOP');
+    assert.equal(r.rows[0].json.do_not_contact, true); assert.equal(r.rows[0].json.opted_out_now, true);
+    assert.equal((await rows(db, "SELECT status FROM outreach WHERE code='zzzzz'"))[0].status, 'skipped');
+    const again = await inbound('+919111111111', 'hello'); assert.equal(again.rows[0].json.opted_out_now, false); assert.equal(again.rows[0].json.do_not_contact, true);
+  });
+  await t('STOP / not interested from friends, family, teachers changes nothing', async () => {
+    for (const [i, ty] of ['friend', 'family', 'teacher'].entries()) {
+      const ph = '+91922222222' + i; await db.query("INSERT INTO contacts(phone,contact_type) VALUES($1,$2)", [ph, ty]);
+      const r = await inbound(ph, 'STOP'); assert.equal(r.rows[0].json.do_not_contact, false, ty);
+    }
+  });
+  await t('Build AI Prompt: colleague has no sales playbook/services; friend unchanged; opt-out and dnc rules appear', async () => {
+    const prompt = async (contact, portfolio = []) => {
+      const ff = makeFlow(db); ff.outs['Load or Create Contact'] = [{ json: contact }]; ff.outs['Load Conversation History'] = []; ff.outs['Load Portfolio (clients only)'] = portfolio.map(json => ({ json }));
+      ff.outs['Validate & Extract'] = [{ json: { text: 'hi', phone: '+91', instanceName: 'I' } }];
+      const o = await ff.run('Build AI Prompt', [{ json: {} }], { YOUR_NAME: 'Nikhil' }); return o[0].json.geminiBody.system_instruction.parts[0].text;
+    };
+    const svc = [{ category: 'services', title: 'Website Development', content: 'starting price Rs 2,999' }];
+    const col = await prompt({ id: 1, contact_type: 'client', relationship: 'colleague', notes: 'ex colleague' }, svc);
+    assert.match(col, /former colleague/); assert.doesNotMatch(col, /How to handle a client conversation/); assert.doesNotMatch(col, /Website Development/); assert.match(col, /AI assistant, NOT/);
+    const cli = await prompt({ id: 2, contact_type: 'client' }, svc); assert.match(cli, /How to handle a client conversation/); assert.match(cli, /Website Development/);
+    const fr = await prompt({ id: 3, contact_type: 'friend' }, svc); assert.match(fr, /close friend/); assert.doesNotMatch(fr, /Website Development/); assert.match(fr, /You ARE Nikhil/);
+    const dnc = await prompt({ id: 4, contact_type: 'client', do_not_contact: true, opted_out_now: true, preferred_language: 'Hindi' }, svc);
+    assert.match(dnc, /not to receive promotional/); assert.match(dnc, /just asked you to stop/); assert.match(dnc, /prefers Hindi/);
+  });
+}
+
+console.log('commands');
+{
+  const db = await freshDb(); const f = makeFlow(db);
+  const parse = async text => { const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net', data: { key: { remoteJid: OWNER + '@s.whatsapp.net', fromMe: true, id: 'P1' }, message: { conversation: text }, messageType: 'conversation' } } } };
+    const v = await f.run('Validate & Extract', [hook]); if (!v[0].json.isStatusCommand) return null; return (await f.run('Parse Status Command', v))[0].json; };
+  await t('command detection is strict; ordinary owner notes are not commands', async () => {
+    for (const s of ['send invoice to Rahul', 'edit my resume', 'skip this', 'send me the file']) assert.equal(await parse(s), null, s);
+    for (const s of ['SEND', 'send a3f9c', 'SKIP a3f9c', 'edit a3f9c new text here']) assert.ok(await parse(s), s);
+  });
+  await t('someone else typing SEND / CLIENT: is a normal message (cannot control the bot)', async () => {
+    const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net', data: { key: { remoteJid: '919999999999@s.whatsapp.net', fromMe: false, id: 'O' }, message: { conversation: 'CLIENT: X | 919876543210 | lead' }, messageType: 'conversation' } } } };
+    const v = (await f.run('Validate & Extract', [hook]))[0].json; assert.equal(v.isStatusCommand, undefined); assert.equal(v.skip, false);
+    hook.json.body.data.message.conversation = 'SEND a3f9c'; assert.equal((await f.run('Validate & Extract', [hook]))[0].json.skip, false);
+  });
+  await t('CLIENT parsing: relationship, 10-digit number, own number, bad number, limits from env', async () => {
+    const a = await parse('CLIENT: Rahul Sharma | 98765 43210 | former client | had a website; business: Cafe X; industry: cafe');
+    assert.equal(a.action, 'outreach_draft'); assert.equal(a.clientPhone, '+919876543210'); assert.equal(a.relationship, 'former_client'); assert.equal(a.business, 'Cafe X'); assert.equal(a.industry, 'cafe');
+    assert.equal(a.dailyLimit, 10); assert.equal(a.cooldownDays, 14); assert.equal(a.ttlHours, 24);
+    assert.equal((await parse('CLIENT: Me | ' + OWNER + ' | lead')).action, 'error'); assert.equal((await parse('CLIENT: X | 12 | lead')).action, 'error'); assert.equal((await parse('CLIENT: only name')).action, 'error');
+    assert.equal((await parse('CLIENT: Old | 9876543210 | website chahiye')).relationship, '');
+    const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net', data: { key: { remoteJid: OWNER + '@s.whatsapp.net', fromMe: true, id: 'P2' }, message: { conversation: 'SEND' }, messageType: 'conversation' } } } };
+    const v = await f.run('Validate & Extract', [hook], ENV); const p = await f.run('Parse Status Command', v, { ...ENV, OUTREACH_DAILY_LIMIT: '3', OUTREACH_COOLDOWN_DAYS: '7', OUTREACH_DRAFT_TTL_HOURS: '2' });
+    assert.equal(p[0].json.dailyLimit, 3); assert.equal(p[0].json.cooldownDays, 7); assert.equal(p[0].json.ttlHours, 2);
+  });
+  await t('existing STATUS and BOT commands still parse', async () => {
+    assert.equal((await parse('STATUS: College mein hu | 3h')).action, 'set'); assert.equal((await parse('STATUS?')).action, 'show'); assert.equal((await parse('BOT OFF')).action, 'bot_off'); assert.equal((await parse('on')).action, 'bot_on');
+  });
+}
+
+console.log('nothing else changed');
+await t('the original reply pipeline nodes are untouched', () => {
+  const touched = new Set(['Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
+  const ref = process.env.BASELINE ? JSON.parse(fs.readFileSync(process.env.BASELINE, 'utf8')) : null;
+  if (!ref) return;
+  const R = Object.fromEntries(ref.nodes.map(n => [n.name, n]));
+  for (const n of ref.nodes) if (!touched.has(n.name)) assert.deepEqual(N[n.name], n, n.name);
+  for (const [s, c] of Object.entries(ref.connections)) if (s !== 'Parse Status Command') assert.deepEqual(wf.connections[s], c, 'connections of ' + s);
+});
+
+console.log('\n' + pass + ' passed, ' + fail + ' failed');
+process.exit(fail ? 1 : 0);
