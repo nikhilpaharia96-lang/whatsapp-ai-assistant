@@ -255,7 +255,7 @@ console.log('draft quality guard');
     'free offer': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. We have a free offer on websites this week!",
     'price': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. Websites start at ₹2,999 for you.",
     'invented claim': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. Nikhil said he has some ideas for your business.",
-    'no identity': 'Hi Rahul! Hope you are doing well and would like a new website soon.',
+    'free wording': 'Hi Rahul! Main Nikhil. Get a free demo this week, limited slots!',
     'link': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. See https://example.com for details.",
     'too long': "Hi Rahul! 👋 I'm Nikhil Paharia's AI assistant. " + 'We build things. '.repeat(40)
   };
@@ -263,7 +263,7 @@ console.log('draft quality guard');
     await t('rejected -> safe template: ' + why, async () => {
       const db = await freshDb(); const f = makeFlow(db, { gemini: good(txt) });
       const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | lead | enquiry', { id: 'Q' }); assert.equal(r.draft.usedFallback, true);
-      assert.doesNotMatch(r.draft.draftText, /free|₹|said|https/i); assert.match(r.draft.draftText, /assistant/i);
+      assert.doesNotMatch(r.draft.draftText, /free|₹|said|https/i); assert.doesNotMatch(r.draft.draftText, /assistant|\bAI\b/i);
     });
   }
   await t('claims the owner brief supports are allowed (ideas, price quoted by owner)', async () => {
@@ -282,7 +282,7 @@ console.log('draft quality guard');
   await t('Hinglish preference gives a Hinglish fallback', async () => {
     const db = await freshDb(); await db.query("INSERT INTO contacts(phone,display_name,preferred_language) VALUES('+919876543210','Rahul','Hinglish')");
     const f = makeFlow(db, { gemini: async () => ({ error: 'x' }) });
-    const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | colleague | hi', { id: 'Q3' }); assert.match(r.draft.draftText, /Main Nikhil Paharia ka AI assistant/);
+    const r = await f.ownerCommand('CLIENT: Rahul | 9876543210 | colleague | hi', { id: 'Q3' }); assert.match(r.draft.draftText, /Hope aap theek honge/); assert.doesNotMatch(r.draft.draftText, /assistant/i);
   });
   await t('Gemini prompt carries language + facts and forbids claims', async () => {
     const db = await freshDb(); let seen;
@@ -340,17 +340,16 @@ console.log('website prospect openers');
     assert.match(ownerMsg, /sirf tumhare liye/); assert.match(ownerMsg, /SEND [0-9a-f]{5}/);
     const stored = (await rows(db, 'SELECT draft_text FROM outreach'))[0].draft_text; assert.doesNotMatch(stored, /pitch|INSIGHT/);
   });
-  await t('identity is stated once: no intro again when the bot already wrote to the contact; value-first prompt', async () => {
+  await t('outreach is written in Nikhil\'s own first-person voice (he approves it), never as an assistant; fallbacks too', async () => {
     const db = await freshDb(); let seen;
     const f = makeFlow(db, { gemini: async g => { seen = g; return { error: 'x' }; } });
-    await f.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N1' });
-    assert.equal(f.outs['Outreach Gate'][0].json.introNeeded, true); assert.match(seen.geminiBody.system_instruction.parts[0].text, /Say once/);
-    await db.query("INSERT INTO messages (contact_id, role, content) SELECT id, 'assistant', 'Hi earlier' FROM contacts WHERE phone='+919876543210'");
-    await db.query("UPDATE outreach SET status='skipped'");
-    const r = await f.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N2' });
-    assert.equal(f.outs['Outreach Gate'][0].json.introNeeded, false);
-    assert.match(seen.geminiBody.system_instruction.parts[0].text, /Do NOT introduce yourself again/); assert.match(seen.geminiBody.system_instruction.parts[0].text, /value for THEIR business/);
-    assert.doesNotMatch(r.draft.draftText, /assistant/i);
+    const r = await f.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N1' });
+    const sys = seen.geminiBody.system_instruction.parts[0].text;
+    assert.match(sys, /own voice/); assert.match(sys, /Do not call yourself an assistant or an AI/); assert.match(sys, /value for THEIR business/);
+    assert.doesNotMatch(r.draft.draftText, /assistant|\bAI\b/i);
+    const ok = makeFlow(await freshDb(), { gemini: good("Hi Ravi! Main Nikhil. Ek simple website se aapke customers aapko online dhoondh sakte hain. Kuch samples dikha du?") });
+    const r2 = await ok.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N2' });
+    assert.equal(r2.draft.usedFallback, false);
   });
   await t('Build AI Prompt: price, objection and closing guidance for client replies', async () => {
     const db = await freshDb(); const ff = makeFlow(db);
@@ -395,7 +394,7 @@ console.log('STOP / not interested and prompt');
     };
     const svc = [{ category: 'services', title: 'Website Development', content: 'starting price Rs 2,999' }];
     const col = await prompt({ id: 1, contact_type: 'client', relationship: 'colleague', notes: 'ex colleague' }, svc);
-    assert.match(col, /former colleague/); assert.doesNotMatch(col, /How to handle a client conversation/); assert.doesNotMatch(col, /Website Development/); assert.match(col, /AI assistant, NOT/);
+    assert.match(col, /former colleague/); assert.doesNotMatch(col, /How to handle a client conversation/); assert.doesNotMatch(col, /Website Development/); assert.match(col, /Never deny it/);
     const cli = await prompt({ id: 2, contact_type: 'client' }, svc); assert.match(cli, /How to handle a client conversation/); assert.match(cli, /Website Development/);
     const fr = await prompt({ id: 3, contact_type: 'friend' }, svc); assert.match(fr, /close friend/); assert.doesNotMatch(fr, /Website Development/); assert.match(fr, /You ARE Nikhil/);
     const dnc = await prompt({ id: 4, contact_type: 'client', do_not_contact: true, opted_out_now: true, preferred_language: 'Hindi' }, svc);

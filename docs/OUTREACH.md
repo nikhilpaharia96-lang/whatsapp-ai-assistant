@@ -92,6 +92,8 @@ Claims about looking at a site, making a video or Google listings are rejected u
 
 Inbound client replies (price, "too expensive", "later", closing) follow the rules in Build AI Prompt: listed starting prices only, no promised discounts, no promised check-in day, payment split 5% / 25% / 70% as on the website, final scope and payment confirmed personally by Nikhil.
 
+Voice: outreach drafts are written in Nikhil's own first-person voice because he reads, edits and approves every one before it is sent. Replies the AI sends on its own do not volunteer that they are AI but never deny it when sincerely asked; promises and final quotes always go to Nikhil.
+
 Not built yet: automatic 3-day and 7-day follow-up reminders (owner-approved drafts, stopped on any reply or STOP).
 
 ## Opportunity insight (owner only)
