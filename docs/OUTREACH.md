@@ -76,3 +76,20 @@ WhatsApp mocked. Nothing is sent anywhere.
 - You vouch for the relationship you type; the bot cannot verify it.
 - Evolution API is an unofficial WhatsApp Web connection. Even approved, low-volume outreach carries some
   risk of the number being restricted. Keep volumes small and messages genuinely relevant.
+
+
+## Website / app prospect openers
+
+`CLIENT: Name | number | lead | <brief>` now picks the opener from facts in the brief (never assumed):
+
+| Brief contains | Kind | Draft says |
+|---|---|---|
+| `no website` / `website nahi` (optional `city: X`, `business: Y`) | `no_website` | no website found, people check online first, simple site in about 7-12 days, offer samples |
+| a problem word (slow, mobile, booking, loading, broken, button ...) | `site_audit` | Nikhil looked at the site, states that exact problem, offers ideas |
+| `video ready` in addition | `site_audit` | may offer the 1 minute fix video; without it any "video" claim is rejected |
+
+Claims about looking at a site, making a video or Google listings are rejected unless the brief supports them; on rejection a safe claim-free template is used. Colleagues, existing clients and friends/family/teachers are unaffected.
+
+Inbound client replies (price, "too expensive", "later", closing) follow the rules in Build AI Prompt: listed starting prices only, no promised discounts, no promised check-in day, payment split 5% / 25% / 70% as on the website, final scope and payment confirmed personally by Nikhil.
+
+Not built yet: automatic 3-day and 7-day follow-up reminders (owner-approved drafts, stopped on any reply or STOP).

@@ -293,6 +293,44 @@ console.log('draft quality guard');
   });
 }
 
+console.log('website prospect openers');
+{
+  const run1 = async (cmd, reply, id) => {
+    const db = await freshDb(); const f = makeFlow(db, { gemini: good(reply) });
+    const r = await f.ownerCommand(cmd, { id }); return { r, f, db };
+  };
+  await t('no-website brief selects no_website kind; claim-free draft passes', async () => {
+    const { r } = await run1('CLIENT: Ravi | 9876543210 | lead | no website; city: Guwahati; business: Cafe Aroma', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil local businesses ke liye simple websites banate hain, aapke Cafe Aroma ke liye bhi 7-12 din me ho sakti hai. Kuch samples dikha du?", 'W1');
+    assert.equal(r.draft.kind, 'no_website'); assert.equal(r.draft.usedFallback, false);
+  });
+  await t('site problem in brief selects site_audit kind and allows the stated problem', async () => {
+    const { r } = await run1('CLIENT: Sana | 9876543211 | lead | website mobile par slow loading; business: Salon', "Hi Sana! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapke Salon ki website dekhi, mobile par slow loading hai jisse customers chhod sakte hain. Fix ke kuch simple ideas bhej du?", 'W2');
+    assert.equal(r.draft.kind, 'site_audit'); assert.equal(r.draft.usedFallback, false);
+  });
+  await t('video claim without a video in the brief is rejected -> safe fallback', async () => {
+    const { r } = await run1('CLIENT: Sana | 9876543211 | lead | website mobile par slow loading', "Hi Sana! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapki website dekhi, slow hai. Maine 1 min ka video banaya hai, bhej du?", 'W3');
+    assert.equal(r.draft.usedFallback, true); assert.match(r.draft.fallbackWhy, /video/);
+    assert.doesNotMatch(r.draft.draftText, /video/i);
+  });
+  await t('video offer is allowed when the brief says a video exists', async () => {
+    const { r } = await run1('CLIENT: Sana | 9876543211 | lead | website mobile par slow loading; video ready', "Hi Sana! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapki website dekhi, mobile par slow loading hai. Fix ka 1 min ka video hai, bhej du?", 'W4');
+    assert.equal(r.draft.usedFallback, false);
+  });
+  await t('"I looked at your site" is rejected when no site problem was given; colleague unaffected', async () => {
+    const { r } = await run1('CLIENT: Ravi | 9876543210 | lead | enquired about a website', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapki website dekhi, kuch problem hai. Bhej du?", 'W5');
+    assert.equal(r.draft.kind, 'follow_up_intro'); assert.equal(r.draft.usedFallback, true);
+    const c = await run1('CLIENT: Masoom | 9876543212 | colleague | no website', "Hi Masoom! I'm Nikhil Paharia's AI assistant. Hope you're doing well, anything I can pass on to Nikhil?", 'W6');
+    assert.equal(c.r.draft.kind, 'reconnect');
+  });
+  await t('Build AI Prompt: price, objection and closing guidance for client replies', async () => {
+    const db = await freshDb(); const ff = makeFlow(db);
+    ff.outs['Load or Create Contact'] = [{ json: { id: 1, contact_type: 'client', display_name: 'Z' } }]; ff.outs['Load Conversation History'] = []; ff.outs['Load Portfolio (clients only)'] = [];
+    ff.outs['Validate & Extract'] = [{ json: { text: 'price?', phone: '+91', instanceName: 'I' } }];
+    const sys = (await ff.run('Build AI Prompt', [{ json: {} }], { YOUR_NAME: 'Nikhil' }))[0].json.geminiBody.system_instruction.parts[0].text;
+    assert.match(sys, /Asked the price/); assert.match(sys, /Too expensive/); assert.match(sys, /5% token/); assert.match(sys, /never promise a lower price/);
+  });
+}
+
 console.log('STOP / not interested and prompt');
 {
   const db = await freshDb(); const f = makeFlow(db);
