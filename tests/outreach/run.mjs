@@ -330,6 +330,16 @@ console.log('website prospect openers');
     const filled = await run1('CLIENT: Ravi | 9876543210 | lead | website | website hai ; city: Guwahati; problem: 1. mobile par slow 2. booking button nahi dikhta', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapki website dekhi, mobile par slow hai aur booking button nahi dikhta. Ideas bhej du?", 'F3');
     assert.equal(filled.r.draft.kind, 'site_audit'); assert.equal(filled.r.draft.usedFallback, false);
   });
+  await t('MESSAGE/INSIGHT output: insight goes to the owner only, never into the client draft', async () => {
+    const { r, f, db } = await run1('CLIENT: Ravi Sharma | 919876543210 | lead | website chahiye | website nahi hai ; city: Guwahati ; business: Cafe Aroma ; problem: no online ordering system ; also: Instagram inactive',
+      "MESSAGE: Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil Guwahati ke businesses ke liye simple websites banate hain, online ordering ke saath bhi. Kuch samples dikha du?\nINSIGHT: Website + online ordering pehle pitch karo. Instagram inactive hai to social media management baad me.", 'I1');
+    assert.equal(r.draft.kind, 'no_website'); assert.equal(r.draft.usedFallback, false);
+    assert.doesNotMatch(r.draft.draftText, /INSIGHT|MESSAGE|Opportunity|pitch/);
+    assert.match(r.draft.insight, /online ordering/);
+    const ownerMsg = f.sent.filter(x => x.to === OWNER).map(x => x.text).join('\n');
+    assert.match(ownerMsg, /sirf tumhare liye/); assert.match(ownerMsg, /SEND [0-9a-f]{5}/);
+    const stored = (await rows(db, 'SELECT draft_text FROM outreach'))[0].draft_text; assert.doesNotMatch(stored, /pitch|INSIGHT/);
+  });
   await t('Build AI Prompt: price, objection and closing guidance for client replies', async () => {
     const db = await freshDb(); const ff = makeFlow(db);
     ff.outs['Load or Create Contact'] = [{ json: { id: 1, contact_type: 'client', display_name: 'Z' } }]; ff.outs['Load Conversation History'] = []; ff.outs['Load Portfolio (clients only)'] = [];

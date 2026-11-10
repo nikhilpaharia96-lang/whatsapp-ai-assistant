@@ -93,3 +93,7 @@ Claims about looking at a site, making a video or Google listings are rejected u
 Inbound client replies (price, "too expensive", "later", closing) follow the rules in Build AI Prompt: listed starting prices only, no promised discounts, no promised check-in day, payment split 5% / 25% / 70% as on the website, final scope and payment confirmed personally by Nikhil.
 
 Not built yet: automatic 3-day and 7-day follow-up reminders (owner-approved drafts, stopped on any reply or STOP).
+
+## Opportunity insight (owner only)
+
+The draft call returns `MESSAGE:` and `INSIGHT:`. The insight (which of Nikhil's services fit the needs in the brief, why, best first pitch) is shown only in the owner's draft message. It is not stored in the draft and never sent to the contact; the client-facing text still goes through the same claim/price/link checks.
