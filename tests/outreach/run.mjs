@@ -340,6 +340,18 @@ console.log('website prospect openers');
     assert.match(ownerMsg, /sirf tumhare liye/); assert.match(ownerMsg, /SEND [0-9a-f]{5}/);
     const stored = (await rows(db, 'SELECT draft_text FROM outreach'))[0].draft_text; assert.doesNotMatch(stored, /pitch|INSIGHT/);
   });
+  await t('identity is stated once: no intro again when the bot already wrote to the contact; value-first prompt', async () => {
+    const db = await freshDb(); let seen;
+    const f = makeFlow(db, { gemini: async g => { seen = g; return { error: 'x' }; } });
+    await f.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N1' });
+    assert.equal(f.outs['Outreach Gate'][0].json.introNeeded, true); assert.match(seen.geminiBody.system_instruction.parts[0].text, /Say once/);
+    await db.query("INSERT INTO messages (contact_id, role, content) SELECT id, 'assistant', 'Hi earlier' FROM contacts WHERE phone='+919876543210'");
+    await db.query("UPDATE outreach SET status='skipped'");
+    const r = await f.ownerCommand('CLIENT: Ravi | 9876543210 | lead | no website ; city: Guwahati', { id: 'N2' });
+    assert.equal(f.outs['Outreach Gate'][0].json.introNeeded, false);
+    assert.match(seen.geminiBody.system_instruction.parts[0].text, /Do NOT introduce yourself again/); assert.match(seen.geminiBody.system_instruction.parts[0].text, /value for THEIR business/);
+    assert.doesNotMatch(r.draft.draftText, /assistant/i);
+  });
   await t('Build AI Prompt: price, objection and closing guidance for client replies', async () => {
     const db = await freshDb(); const ff = makeFlow(db);
     ff.outs['Load or Create Contact'] = [{ json: { id: 1, contact_type: 'client', display_name: 'Z' } }]; ff.outs['Load Conversation History'] = []; ff.outs['Load Portfolio (clients only)'] = [];
