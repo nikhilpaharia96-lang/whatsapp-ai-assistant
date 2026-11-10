@@ -322,6 +322,14 @@ console.log('website prospect openers');
     const c = await run1('CLIENT: Masoom | 9876543212 | colleague | no website', "Hi Masoom! I'm Nikhil Paharia's AI assistant. Hope you're doing well, anything I can pass on to Nikhil?", 'W6');
     assert.equal(c.r.draft.kind, 'reconnect');
   });
+  await t('owner form: blank problem fields do not trigger site_audit; "nehi he" spelling means no website; filled problems do', async () => {
+    const blank = await run1('CLIENT: Ravi | 9876543210 | lead | website | kya website hai ya nahi ; city: Guwahati; problem: 1.___________ 2.___________ & n________ ; alson: 1.______', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Aap kis cheez me madad chahte hain?", 'F1');
+    assert.equal(blank.r.draft.kind, 'follow_up_intro');
+    const nehi = await run1('CLIENT: Ravi | 9876543210 | lead | website | website nehi he ; city: Guwahati', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil local businesses ke liye simple websites banate hain. Samples dikha du?", 'F2');
+    assert.equal(nehi.r.draft.kind, 'no_website');
+    const filled = await run1('CLIENT: Ravi | 9876543210 | lead | website | website hai ; city: Guwahati; problem: 1. mobile par slow 2. booking button nahi dikhta', "Hi Ravi! Main Nikhil Paharia ka AI assistant hu. Nikhil ne aapki website dekhi, mobile par slow hai aur booking button nahi dikhta. Ideas bhej du?", 'F3');
+    assert.equal(filled.r.draft.kind, 'site_audit'); assert.equal(filled.r.draft.usedFallback, false);
+  });
   await t('Build AI Prompt: price, objection and closing guidance for client replies', async () => {
     const db = await freshDb(); const ff = makeFlow(db);
     ff.outs['Load or Create Contact'] = [{ json: { id: 1, contact_type: 'client', display_name: 'Z' } }]; ff.outs['Load Conversation History'] = []; ff.outs['Load Portfolio (clients only)'] = [];
