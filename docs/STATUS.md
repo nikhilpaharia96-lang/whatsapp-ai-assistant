@@ -55,3 +55,16 @@ State `bot_settings` table me save hoti hai (database/init.sql), isliye restart 
 
 `CLIENT:` ab kabhi turant message nahi bhejta. Wo sirf ek **draft** banata hai jo tumhe approve karna hota hai.
 Poori detail: [OUTREACH.md](OUTREACH.md).
+
+
+## Saving contacts from Message Yourself
+
+Send one or more lines (optionally after `SAVE:`):
+
+```
+naam | number | dost/family/teacher/client | kaise baat kare (optional)
+Rahul | 919876543210 | dost | gaali-wala mazaak chalega
+Priya Ma'am | 919123456789 | teacher | Chemistry ki teacher
+```
+
+Types: dost/friend/yaar -> friend, family/ghar -> family, teacher/sir/madam/professor -> teacher, client -> client, unknown. The note is stored in the contact's notes as data for the AI (not as instructions). Existing contacts are updated, never duplicated, and their chat history and blocked / do_not_contact flags are untouched. Up to 30 lines per message; bad lines are reported and skipped. Retried webhooks save and confirm once. Only works from your own self-chat or YOUR_PHONE.

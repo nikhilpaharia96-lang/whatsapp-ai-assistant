@@ -360,6 +360,62 @@ console.log('website prospect openers');
   });
 }
 
+console.log('saving contacts from message-yourself');
+{
+  const save = async (f, text, id) => {
+    const r = await f.ownerCommand(text, { id });
+    if (r.notCommand) return { notCommand: true };
+    const rowsS = await f.sql('Save Status', [{ json: r.parsed }]);
+    const conf = await f.run('Build Status Confirmation', rowsS.length ? rowsS : [{ json: {} }]);
+    return { parsed: r.parsed, rowsS, text: conf[0]?.json?.text || '' };
+  };
+  await t('plain lines "name | number | dost/family/teacher/client | how to talk" save with types and notes', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    const r = await save(f, "Rahul | 919876543210 | dost | gaali-wala mazaak chalega\nPriya Ma'am | 919123456789 | teacher | Chemistry ki teacher\nAman | 919000000001 | family", 'C1');
+    assert.equal(r.parsed.action, 'contact_save'); assert.match(r.text, /3 contact save/);
+    const c = await rows(db, "SELECT display_name,contact_type,notes FROM contacts WHERE phone IN ('+919876543210','+919123456789','+919000000001') ORDER BY phone");
+    const by = Object.fromEntries(c.map(x => [x.display_name, x]));
+    assert.equal(by['Rahul'].contact_type, 'friend'); assert.match(by['Rahul'].notes, /gaali-wala/);
+    assert.equal(by["Priya Ma'am"].contact_type, 'teacher'); assert.equal(by['Aman'].contact_type, 'family'); assert.equal(by['Aman'].notes, null);
+  });
+  await t('SAVE: prefix works; existing contact keeps history and gets updated, not duplicated', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    await db.query("INSERT INTO contacts(phone,display_name,contact_type) VALUES('+919876543210','Old','unknown')");
+    await db.query("INSERT INTO messages(contact_id,role,content) SELECT id,'user','hello' FROM contacts WHERE phone='+919876543210'");
+    const r = await save(f, 'SAVE: Rahul | 9876543210 | friend | roast chalega', 'C2');
+    assert.match(r.text, /update/);
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM contacts WHERE phone='+919876543210'"))[0].n, 1);
+    assert.equal((await rows(db, "SELECT contact_type FROM contacts WHERE phone='+919876543210'"))[0].contact_type, 'friend');
+    assert.equal((await rows(db, "SELECT COUNT(*)::int n FROM messages"))[0].n, 1);
+  });
+  await t('webhook retry of the same message: saved once, confirmed once', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    await save(f, 'Rahul | 919876543210 | dost | roast', 'C3');
+    const again = await save(f, 'Rahul | 919876543210 | dost | roast', 'C3');
+    assert.equal(again.text, '');
+    assert.match((await rows(db, "SELECT notes FROM contacts WHERE phone='+919876543210'"))[0].notes, /roast/);
+  });
+  await t('bad lines are reported and skipped; blocked/do_not_contact flags untouched; own number refused', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    await db.query("INSERT INTO contacts(phone,display_name,contact_type,do_not_contact,is_blocked) VALUES('+919111111111','X','client',TRUE,TRUE)");
+    const r = await save(f, 'SAVE: X | 919111111111 | dost\nBad | 123 | dost\nWho | 919222222222 | ajeeb\nMe | ' + OWNER + ' | dost', 'C4');
+    assert.match(r.text, /1 contact save/); assert.match(r.text, /number galat/); assert.match(r.text, /type samajh nahi/); assert.match(r.text, /apna number/);
+    const x = (await rows(db, "SELECT contact_type,do_not_contact,is_blocked FROM contacts WHERE phone='+919111111111'"))[0];
+    assert.equal(x.contact_type, 'friend'); assert.equal(x.do_not_contact, true); assert.equal(x.is_blocked, true);
+  });
+  await t('nothing valid -> usage hint; names that start with send/skip/edit are not mistaken for commands', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    const bad = await f.ownerCommand('SAVE: nonsense', { id: 'C5' }); assert.equal(bad.parsed.action, 'error'); assert.match(bad.parsed.errorMsg, /naam \| number/);
+    const r = await save(f, 'Send Kumar | 919333333333 | client', 'C6'); assert.equal(r.parsed.action, 'contact_save');
+    assert.equal((await rows(db, "SELECT contact_type FROM contacts WHERE phone='+919333333333'"))[0].contact_type, 'client');
+  });
+  await t('someone else sending such lines is a normal message (cannot save contacts)', async () => {
+    const db = await freshDb(); const f = makeFlow(db, {});
+    const hook = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', data: { key: { remoteJid: '919444444444@s.whatsapp.net', fromMe: false, id: 'Z1' }, message: { conversation: 'Rahul | 919876543210 | dost' }, messageType: 'conversation' } } } };
+    const v = (await f.run('Validate & Extract', [hook]))[0]; assert.equal(v.json.isStatusCommand, undefined); assert.equal(v.json.skip, false);
+  });
+}
+
 console.log('STOP / not interested and prompt');
 {
   const db = await freshDb(); const f = makeFlow(db);
