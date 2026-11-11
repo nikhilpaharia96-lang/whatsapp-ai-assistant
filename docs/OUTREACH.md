@@ -94,7 +94,15 @@ Inbound client replies (price, "too expensive", "later", closing) follow the rul
 
 Voice: outreach drafts are written in Nikhil's own first-person voice because he reads, edits and approves every one before it is sent. Replies the AI sends on its own do not volunteer that they are AI but never deny it when sincerely asked; promises and final quotes always go to Nikhil.
 
-Not built yet: automatic 3-day and 7-day follow-up reminders (owner-approved drafts, stopped on any reply or STOP).
+## Follow-ups (3 and 7 days)
+
+An hourly schedule (10:00-19:30 IST only) finds `no_website` / `site_audit` outreach that was sent 3+ days ago, got no reply, and whose contact is not do_not_contact / blocked / friend / family / teacher. It creates ONE claim-free draft (`followup_3d`, later `followup_7d`) and WhatsApps Nikhil a reminder with `SEND / EDIT / SKIP <code>`. Nothing reaches the contact without SEND. A reply from the contact before SEND blocks it. Follow-ups skip the 14-day cooldown but still obey the daily cap, BOT OFF and opt-out.
+
+## Safety guards
+
+- Business auto-replies (menus, "Welcome to...", call-decline quick replies) are ignored, so the bot never talks to another bot.
+- The AI may not promise anything on Nikhil's behalf (call, payment, handover, dates). Such sentences become "I'll pass this on to Nikhil." and Nikhil gets an escalation alert.
+- After EDIT, the bot warns (non-blocking) about claims not in the brief (follower counts, domain/expired, Google/Facebook, "I saw/noticed").
 
 ## Opportunity insight (owner only)
 

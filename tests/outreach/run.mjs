@@ -22,7 +22,7 @@ await t('every connection points at an existing node; no orphan nodes', () => {
     assert.ok(N[src], 'source ' + src);
     for (const out of c.main) for (const l of out) { assert.ok(N[l.node], 'target ' + l.node); targets.add(l.node); }
   }
-  const orphans = wf.nodes.filter(n => !targets.has(n.name) && n.name !== 'WhatsApp Webhook').map(n => n.name);
+  const orphans = wf.nodes.filter(n => !targets.has(n.name) && !['WhatsApp Webhook', 'Follow-up Schedule'].includes(n.name)).map(n => n.name);
   assert.deepEqual(orphans, []);
 });
 await t('Parse Status Command no longer goes straight to Save Status', () => {
@@ -487,9 +487,83 @@ console.log('commands');
   });
 }
 
+
+console.log('auto-reply guard, commitment guard, edit warning, follow-ups');
+{
+  const db = await freshDb(); const f = makeFlow(db, { gemini: good(GOOD_LEAD) });
+  const inbound = text => ({ json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net',
+    data: { key: { remoteJid: '919811112222@s.whatsapp.net', fromMe: false, id: 'X' + Math.random() }, pushName: 'Biz', message: { conversation: text }, messageType: 'conversation' } } } });
+  await t('business auto-reply menus and call-decline quick replies are skipped', async () => {
+    for (const x of ['Welcome to PANJABIPASSIONS ❤️\n\nWhat would you like to see?\n\nPlease reply - \n\nMEKHELA     or.      KURTA.', "I'll call you right back.", "Can't talk, what's up?", 'Thank you for contacting us! We will get back to you shortly.', 'This is an automated message. Our business hours are 10-6.']) {
+      const r = (await f.run('Validate & Extract', [inbound(x)]))[0].json; assert.equal(r.reason, 'auto_reply', x);
+    }
+  });
+  await t('normal human messages still get through', async () => {
+    for (const x of ['Hi, I need a website for my shop', 'Please reply when free', 'Kal call karo', 'ok will call you right back after lunch with the team', 'welcome back!']) {
+      assert.equal((await f.run('Validate & Extract', [inbound(x)]))[0].json.skip, false, x);
+    }
+  });
+  const parseAI = async text => {
+    f.outs['Build AI Prompt'] = [{ json: { geminiBody: {}, phone: '+919811112222', contactType: 'client', instanceName: 'I', originalText: 'x' } }];
+    return (await f.run('Parse AI Response', [{ json: { candidates: [{ content: { parts: [{ text }] } }] } }])).map(i => i.json);
+  };
+  await t('AI promise on Nikhil behalf is replaced and escalated', async () => {
+    const r = (await parseAI('Sure, take your time. Nikhil will personally follow up with you regarding the final payment and website handover details.'))[0];
+    assert.doesNotMatch(r.aiReply, /payment|handover/i); assert.match(r.aiReply, /pass this on to Nikhil/); assert.equal(r.needsEscalation, true); assert.match(r.escalationData.reason, /promise/);
+  });
+  await t('harmless AI replies are untouched', async () => {
+    const r = (await parseAI("Sure! What kind of website are you looking for? I'll pass this on to Nikhil if you want a custom quote."))[0];
+    assert.match(r.aiReply, /What kind of website/); assert.equal(r.needsEscalation, false);
+  });
+  await t('EDIT warns about claims missing from the brief, and stays quiet when they are in it', async () => {
+    const mk = async brief => { const db2 = await freshDb(); const g = makeFlow(db2, { gemini: good(GOOD_LEAD) });
+      await g.ownerCommand('CLIENT: Anjali | 9876500001 | lead | ' + brief, { id: 'E' + brief.length }); const c = code(g); g.clear();
+      await g.ownerCommand('EDIT ' + c + ' Hi Anjali, I came across your Facebook page, 10K followers and a big collection. A website would help.'); return toOwner(g)[0].text; };
+    const bad = await mk('no website ; city: Guwahati'); assert.match(bad, /Check karo/); assert.match(bad, /10K followers/);
+    const ok = await mk('no website ; facebook page has 10K followers; I came across it');
+    assert.doesNotMatch(ok, /10K followers.*nahi mili/);
+  });
+  await t('follow-ups: 3 day draft created once, owner reminded, nothing sent to contact; reply stops it', async () => {
+    const db2 = await freshDb(); const g = makeFlow(db2, { gemini: good(GOOD_LEAD) });
+    await g.ownerCommand('CLIENT: Ravi Sharma | 9876500002 | lead | no website ; city: Guwahati', { id: 'F1' }); const c1 = code(g);
+    await g.ownerCommand('SEND ' + c1); assert.equal(toClient(g).length, 1);
+    await db2.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '4 days'"); g.clear();
+    // run the scheduled node SQL; force the hour window open by shifting it in the test copy
+    const q = N['Find Due Follow-ups'].parameters.query.replace(/AND \(NOW\(\) AT TIME ZONE 'Asia\/Kolkata'\)::time BETWEEN '10:00' AND '19:30'/, '');
+    const r1 = (await db2.query(q)).rows; assert.equal(r1.length, 1); assert.equal(r1[0].kind, 'followup_3d');
+    assert.equal((await db2.query(q)).rows.length, 0, 'idempotent');
+    const rem = await g.run('Build Follow-up Reminder', r1.map(json => ({ json })), { ...ENV, EVOLUTION_INSTANCE_NAME: 'I' });
+    assert.equal(rem.length, 1); assert.equal(rem[0].json.number, OWNER); assert.match(rem[0].json.text, /Follow-up \(3 din\): Ravi Sharma/); assert.match(rem[0].json.text, /SEND [0-9a-f]{5}/);
+    assert.equal(toClient(g).length, 0);
+    assert.match(r1[0].draft_text, /^Hi Ravi,/);
+    // SEND works despite the 14 day cooldown
+    await g.ownerCommand('SEND ' + r1[0].code); assert.equal(toClient(g).length, 1, 'follow-up sent after approval');
+    // 7 day
+    await db2.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '8 days' WHERE kind <> 'followup_3d'"); await db2.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '4 days' WHERE kind = 'followup_3d'");
+    const r2 = (await db2.query(q)).rows; assert.equal(r2.length, 0, 'newer sent follow-up blocks a second one until it ages');
+  });
+  await t('follow-ups: not for replied, DNC, friends, or when BOT OFF; reply before SEND blocks it', async () => {
+    const db2 = await freshDb(); const g = makeFlow(db2, { gemini: good(GOOD_LEAD) });
+    const q = N['Find Due Follow-ups'].parameters.query.replace(/AND \(NOW\(\) AT TIME ZONE 'Asia\/Kolkata'\)::time BETWEEN '10:00' AND '19:30'/, '');
+    await g.ownerCommand('CLIENT: A One | 9876500003 | lead | no website', { id: 'G1' }); await g.ownerCommand('SEND ' + code(g)); g.clear();
+    await g.ownerCommand('CLIENT: B Two | 9876500004 | lead | no website', { id: 'G2' }); await g.ownerCommand('SEND ' + code(g).trim()); g.clear();
+    await db2.query("UPDATE outreach SET sent_at = NOW() - INTERVAL '4 days'");
+    await db2.query("INSERT INTO messages (contact_id, role, content) SELECT id, 'user', 'haan batao' FROM contacts WHERE phone = '+919876500003'");
+    await db2.query("UPDATE contacts SET do_not_contact = TRUE WHERE phone = '+919876500004'");
+    assert.equal((await db2.query(q)).rows.length, 0);
+    await db2.query("UPDATE contacts SET do_not_contact = FALSE WHERE phone = '+919876500004'");
+    await db2.query("INSERT INTO bot_settings (key, value) VALUES ('autoreply', 'off') ON CONFLICT (key) DO UPDATE SET value = 'off'");
+    assert.equal((await db2.query(q)).rows.length, 0, 'BOT OFF');
+    await db2.query("UPDATE bot_settings SET value = 'on' WHERE key = 'autoreply'");
+    const r = (await db2.query(q)).rows; assert.equal(r.length, 1); assert.equal(r[0].display_name, 'B Two');
+    await db2.query("INSERT INTO messages (contact_id, role, content) SELECT id, 'user', 'busy abhi' FROM contacts WHERE phone = '+919876500004'");
+    g.clear(); await g.ownerCommand('SEND ' + r[0].code); assert.equal(toClient(g).length, 0); assert.match(toOwner(g)[0].text, /reply kar diya/);
+  });
+}
+
 console.log('nothing else changed');
 await t('the original reply pipeline nodes are untouched', () => {
-  const touched = new Set(['Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
+  const touched = new Set(['Parse AI Response', 'Outreach Decide', 'Outreach Router', 'Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
   const ref = process.env.BASELINE ? JSON.parse(fs.readFileSync(process.env.BASELINE, 'utf8')) : null;
   if (!ref) return;
   const R = Object.fromEntries(ref.nodes.map(n => [n.name, n]));
