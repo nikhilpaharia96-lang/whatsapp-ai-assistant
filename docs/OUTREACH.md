@@ -107,3 +107,9 @@ An hourly schedule (10:00-19:30 IST only) finds `no_website` / `site_audit` outr
 ## Opportunity insight (owner only)
 
 The draft call returns `MESSAGE:` and `INSIGHT:`. The insight (which of Nikhil's services fit the needs in the brief, why, best first pitch) is shown only in the owner's draft message. It is not stored in the draft and never sent to the contact; the client-facing text still goes through the same claim/price/link checks.
+
+## Conversation memory and human takeover
+
+- Messages Nikhil types himself in a 1:1 chat are saved to that contact's history (role assistant, `wa_message_id` = `owner:<id>`), so when the contact writes again the AI continues from the real conversation. Echoes of the bot's own sends are detected by text and not saved twice.
+- After Nikhil types to a contact, the AI stays silent for 15 minutes for that contact (their messages are still saved).
+- History sent to the AI is the last 40 messages with no time limit (it used to be 48 hours).

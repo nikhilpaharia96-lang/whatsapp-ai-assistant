@@ -27,7 +27,7 @@
         300
       ],
       "parameters": {
-        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: text.trim(),\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Ignore our own outgoing messages (Evolution echoes them)\nif (msg.key?.fromMe === true) {\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
+        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: text.trim(),\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Our own outgoing messages. Messages Nikhil types himself in a 1:1 chat are passed on ('owner_message') so they are\n//    saved to the conversation history (the AI then knows what he said) and pause the AI for a while.\n//    Echoes of the bot's own sends are removed again in 'Save Owner Message'. Self-chat and groups are ignored.\nif (msg.key?.fromMe === true) {\n  let oj = msg.key?.remoteJid || '';\n  if (oj.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) oj = msg.key.remoteJidAlt;\n  const od = oj.endsWith('@s.whatsapp.net') ? digits(oj.split('@')[0].split(':')[0]) : '';\n  const me = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  if (od && od !== me) {\n    return [{ json: { skip: true, reason: 'owner_message', phone: '+' + od, text: text.trim(), messageId: msg.key?.id || '' } }];\n  }\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
       }
     },
     {
@@ -163,7 +163,7 @@
       ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "WITH prev AS (\n  SELECT do_not_contact FROM contacts WHERE phone = $1\n), c AS (\n  INSERT INTO contacts (phone, display_name, contact_type, last_active)\n  VALUES ($1, NULLIF($2, ''), $3, NOW())\n  ON CONFLICT (phone) DO UPDATE SET\n    last_active  = NOW(),\n    display_name = COALESCE(contacts.display_name, EXCLUDED.display_name),\n    contact_type = CASE WHEN contacts.contact_type = 'unknown'\n                        THEN EXCLUDED.contact_type\n                        ELSE contacts.contact_type END,\n    do_not_contact    = contacts.do_not_contact OR ($4::boolean AND contacts.contact_type NOT IN ('friend', 'family', 'teacher')),\n    do_not_contact_at = CASE WHEN NOT contacts.do_not_contact AND $4::boolean AND contacts.contact_type NOT IN ('friend', 'family', 'teacher')\n                             THEN NOW() ELSE contacts.do_not_contact_at END\n  RETURNING id, phone, display_name, contact_type, tone_override, is_blocked, notes, metadata,\n            relationship, preferred_language, do_not_contact\n), o AS (\n  UPDATE outreach SET status = 'skipped'\n  FROM c\n  WHERE outreach.contact_id = c.id AND outreach.status = 'draft'\n    AND c.do_not_contact AND NOT COALESCE((SELECT do_not_contact FROM prev), FALSE)\n  RETURNING 1\n)\nSELECT c.*,\n       COALESCE((SELECT value FROM bot_settings WHERE key = 'autoreply'), 'on') = 'off' AS bot_off,\n       (c.do_not_contact AND NOT COALESCE((SELECT do_not_contact FROM prev), FALSE)) AS opted_out_now\nFROM c;",
+        "query": "WITH prev AS (\n  SELECT do_not_contact FROM contacts WHERE phone = $1\n), c AS (\n  INSERT INTO contacts (phone, display_name, contact_type, last_active)\n  VALUES ($1, NULLIF($2, ''), $3, NOW())\n  ON CONFLICT (phone) DO UPDATE SET\n    last_active  = NOW(),\n    display_name = COALESCE(contacts.display_name, EXCLUDED.display_name),\n    contact_type = CASE WHEN contacts.contact_type = 'unknown'\n                        THEN EXCLUDED.contact_type\n                        ELSE contacts.contact_type END,\n    do_not_contact    = contacts.do_not_contact OR ($4::boolean AND contacts.contact_type NOT IN ('friend', 'family', 'teacher')),\n    do_not_contact_at = CASE WHEN NOT contacts.do_not_contact AND $4::boolean AND contacts.contact_type NOT IN ('friend', 'family', 'teacher')\n                             THEN NOW() ELSE contacts.do_not_contact_at END\n  RETURNING id, phone, display_name, contact_type, tone_override, is_blocked, notes, metadata,\n            relationship, preferred_language, do_not_contact\n), o AS (\n  UPDATE outreach SET status = 'skipped'\n  FROM c\n  WHERE outreach.contact_id = c.id AND outreach.status = 'draft'\n    AND c.do_not_contact AND NOT COALESCE((SELECT do_not_contact FROM prev), FALSE)\n  RETURNING 1\n)\nSELECT c.*,\n       COALESCE((SELECT value FROM bot_settings WHERE key = 'autoreply'), 'on') = 'off' AS bot_off,\n       (c.do_not_contact AND NOT COALESCE((SELECT do_not_contact FROM prev), FALSE)) AS opted_out_now,\n       EXISTS (SELECT 1 FROM messages m WHERE m.contact_id = c.id AND m.wa_message_id LIKE 'owner:%'\n                 AND m.created_at > NOW() - INTERVAL '15 minutes') AS owner_active\nFROM c;",
         "options": {
           "queryReplacement": "={{ [$('Validate & Extract').first().json.phone, $('Validate & Extract').first().json.pushName || '', $('Validate & Extract').first().json.contactTypeHint, $('Validate & Extract').first().json.optOut === true] }}"
         }
@@ -235,7 +235,7 @@
       ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT role, content, created_at\nFROM (\n  SELECT role, content, created_at\n  FROM messages\n  WHERE contact_id = $1\n    AND created_at > NOW() - INTERVAL '48 hours'\n  ORDER BY created_at DESC\n  LIMIT 30\n) recent\nORDER BY created_at ASC;",
+        "query": "SELECT role, content, created_at\nFROM (\n  SELECT role, content, created_at\n  FROM messages\n  WHERE contact_id = $1\n  ORDER BY created_at DESC\n  LIMIT 40\n) recent\nORDER BY created_at ASC;",
         "options": {
           "queryReplacement": "={{ [$('Load or Create Contact').first().json.id] }}"
         }
@@ -1134,6 +1134,99 @@
           "timeout": 20000
         }
       }
+    },
+    {
+      "id": "owner_msg_if",
+      "name": "Owner message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        460,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "owner_msg_if-cond",
+              "leftValue": "={{ $json.reason === 'owner_message' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "owner_msg_save",
+      "name": "Save Owner Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        680,
+        40
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH s AS (SELECT pg_sleep(6)), c AS (\n  INSERT INTO contacts (phone, contact_type, last_active)\n  VALUES ($1::text, 'unknown', NOW())\n  ON CONFLICT (phone) DO UPDATE SET last_active = NOW()\n  RETURNING id\n)\nINSERT INTO messages (contact_id, role, content, wa_message_id)\nSELECT c.id, 'assistant', $2::text, 'owner:' || $3::text\nFROM c, s\nWHERE NOT EXISTS (SELECT 1 FROM messages m\n                  WHERE m.contact_id = c.id AND m.role = 'assistant' AND m.created_at > NOW() - INTERVAL '10 minutes'\n                    AND position($2::text IN m.content) > 0)\nON CONFLICT DO NOTHING\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [$('Validate & Extract').first().json.phone, $('Validate & Extract').first().json.text, $('Validate & Extract').first().json.messageId] }}"
+        }
+      }
+    },
+    {
+      "id": "owner_chat_if",
+      "name": "Owner chatting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2120,
+        540
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "owner_chat_if-cond",
+              "leftValue": "={{ $('Load or Create Contact').first().json.owner_active === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -1168,7 +1261,7 @@
       "main": [
         [
           {
-            "node": "Respond 200 (skip)",
+            "node": "Owner message?",
             "type": "main",
             "index": 0
           }
@@ -1401,7 +1494,7 @@
         ],
         [
           {
-            "node": "Build AI Prompt",
+            "node": "Owner chatting?",
             "type": "main",
             "index": 0
           }
@@ -1673,6 +1766,53 @@
         [
           {
             "node": "Send Follow-up Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Owner message?": {
+      "main": [
+        [
+          {
+            "node": "Save Owner Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 200 (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Owner Message": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Owner chatting?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (skip)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build AI Prompt",
             "type": "main",
             "index": 0
           }

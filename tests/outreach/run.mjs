@@ -561,9 +561,47 @@ console.log('auto-reply guard, commitment guard, edit warning, follow-ups');
   });
 }
 
+console.log('owner messages are remembered and pause the AI');
+{
+  const db = await freshDb(); const f = makeFlow(db, {});
+  const ownerHook = (to, text, id) => ({ json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net',
+    data: { key: { remoteJid: to + '@s.whatsapp.net', fromMe: true, id }, message: { conversation: text }, messageType: 'conversation' } } } });
+  const saveQ = N['Save Owner Message'].parameters.query.replace('pg_sleep(6)', 'pg_sleep(0)');
+  const save = async (phone, text, id) => (await db.query(saveQ, [phone, text, id])).rows;
+  await t('Nikhil typing to a contact is passed on; self-chat is not', async () => {
+    const r = (await f.run('Validate & Extract', [ownerHook('919811113333', 'Kal milte hain bhai', 'O1')]))[0].json;
+    assert.equal(r.reason, 'owner_message'); assert.equal(r.phone, '+919811113333'); assert.equal(r.text, 'Kal milte hain bhai');
+    assert.equal((await f.run('Validate & Extract', [ownerHook(OWNER, 'note to self', 'O2')]))[0].json.reason, 'own_message');
+  });
+  await t('owner message is saved to history (contact created), once; retries and bot echoes are not duplicated', async () => {
+    assert.equal((await save('+919811113333', 'Kal milte hain bhai', 'O1')).length, 1);
+    assert.equal((await save('+919811113333', 'Kal milte hain bhai', 'O1')).length, 0, 'same id');
+    await db.query("INSERT INTO messages (contact_id, role, content) SELECT id, 'assistant', 'Sure! Here are the details: price starts at 5000.' FROM contacts WHERE phone = '+919811113333'");
+    assert.equal((await save('+919811113333', 'Sure! Here are the details: price starts at 5000.', 'O3')).length, 0, 'echo of the AI reply');
+    const c = (await db.query("SELECT contact_type FROM contacts WHERE phone = '+919811113333'")).rows[0]; assert.equal(c.contact_type, 'unknown');
+  });
+  await t('AI is paused 15 minutes after Nikhil types, then resumes', async () => {
+    const q = N['Load or Create Contact'].parameters.query;
+    const r1 = (await db.query(q, ['+919811113333', '', 'unknown', false])).rows[0]; assert.equal(r1.owner_active, true);
+    await db.query("UPDATE messages SET created_at = NOW() - INTERVAL '16 minutes'");
+    const r2 = (await db.query(q, ['+919811113333', '', 'unknown', false])).rows[0]; assert.equal(r2.owner_active, false);
+  });
+  await t('conversation history is no longer cut off after 48 hours', async () => {
+    await db.query("UPDATE messages SET created_at = NOW() - INTERVAL '5 days'");
+    const id = (await db.query("SELECT id FROM contacts WHERE phone = '+919811113333'")).rows[0].id;
+    const h = (await db.query(N['Load Conversation History'].parameters.query, [id])).rows; assert.ok(h.length >= 2);
+  });
+  await t('graph: owner branch and pause are wired', () => {
+    assert.deepEqual(wf.connections['Skip check'].main[0].map(l => l.node), ['Owner message?']);
+    assert.deepEqual(wf.connections['Owner message?'].main.map(o => o[0].node), ['Save Owner Message', 'Respond 200 (skip)']);
+    assert.deepEqual(wf.connections['Duplicate message?'].main[1].map(l => l.node), ['Owner chatting?']);
+    assert.deepEqual(wf.connections['Owner chatting?'].main.map(o => o[0].node), ['Respond 200 (skip)', 'Build AI Prompt']);
+  });
+}
+
 console.log('nothing else changed');
 await t('the original reply pipeline nodes are untouched', () => {
-  const touched = new Set(['Parse AI Response', 'Outreach Decide', 'Outreach Router', 'Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
+  const touched = new Set(['Skip check', 'Duplicate message?', 'Load Conversation History', 'Parse AI Response', 'Outreach Decide', 'Outreach Router', 'Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
   const ref = process.env.BASELINE ? JSON.parse(fs.readFileSync(process.env.BASELINE, 'utf8')) : null;
   if (!ref) return;
   const R = Object.fromEntries(ref.nodes.map(n => [n.name, n]));
