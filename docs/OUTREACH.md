@@ -111,5 +111,5 @@ The draft call returns `MESSAGE:` and `INSIGHT:`. The insight (which of Nikhil's
 ## Conversation memory and human takeover
 
 - Messages Nikhil types himself in a 1:1 chat are saved to that contact's history (role assistant, `wa_message_id` = `owner:<id>`), so when the contact writes again the AI continues from the real conversation. Echoes of the bot's own sends are detected by text and not saved twice.
-- After Nikhil types to a contact, the AI stays silent for 15 minutes for that contact (their messages are still saved).
+- After Nikhil types to a contact, the AI stays silent for 7 minutes for that contact (their messages are still saved).
 - History sent to the AI is the last 40 messages with no time limit (it used to be 48 hours).

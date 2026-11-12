@@ -580,10 +580,10 @@ console.log('owner messages are remembered and pause the AI');
     assert.equal((await save('+919811113333', 'Sure! Here are the details: price starts at 5000.', 'O3')).length, 0, 'echo of the AI reply');
     const c = (await db.query("SELECT contact_type FROM contacts WHERE phone = '+919811113333'")).rows[0]; assert.equal(c.contact_type, 'unknown');
   });
-  await t('AI is paused 15 minutes after Nikhil types, then resumes', async () => {
+  await t('AI is paused 7 minutes after Nikhil types, then resumes', async () => {
     const q = N['Load or Create Contact'].parameters.query;
     const r1 = (await db.query(q, ['+919811113333', '', 'unknown', false])).rows[0]; assert.equal(r1.owner_active, true);
-    await db.query("UPDATE messages SET created_at = NOW() - INTERVAL '16 minutes'");
+    await db.query("UPDATE messages SET created_at = NOW() - INTERVAL '8 minutes'");
     const r2 = (await db.query(q, ['+919811113333', '', 'unknown', false])).rows[0]; assert.equal(r2.owner_active, false);
   });
   await t('conversation history is no longer cut off after 48 hours', async () => {
