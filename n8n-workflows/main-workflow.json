@@ -27,7 +27,7 @@
         300
       ],
       "parameters": {
-        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: text.trim(),\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Our own outgoing messages. Messages Nikhil types himself in a 1:1 chat are passed on ('owner_message') so they are\n//    saved to the conversation history (the AI then knows what he said) and pause the AI for a while.\n//    Echoes of the bot's own sends are removed again in 'Save Owner Message'. Self-chat and groups are ignored.\nif (msg.key?.fromMe === true) {\n  let oj = msg.key?.remoteJid || '';\n  if (oj.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) oj = msg.key.remoteJidAlt;\n  const od = oj.endsWith('@s.whatsapp.net') ? digits(oj.split('@')[0].split(':')[0]) : '';\n  const me = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  if (od && od !== me) {\n    return [{ json: { skip: true, reason: 'owner_message', phone: '+' + od, text: text.trim(), messageId: msg.key?.id || '' } }];\n  }\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
+        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|mail\\s+[0-9a-f]{4,6}\\s+[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    // \"MAIL a3f9c name@example.com\" = approve draft a3f9c, but send it by email (Gmail) instead of WhatsApp\n    const mm = text.trim().match(/^mail\\s+([0-9a-f]{4,6})\\s+([^\\s@]+@[^\\s@]+\\.[^\\s@]+)$/i);\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: mm ? 'SEND ' + mm[1] : text.trim(),\n      mailTo: mm ? mm[2].toLowerCase() : '',\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Our own outgoing messages. Messages Nikhil types himself in a 1:1 chat are passed on ('owner_message') so they are\n//    saved to the conversation history (the AI then knows what he said) and pause the AI for a while.\n//    Echoes of the bot's own sends are removed again in 'Save Owner Message'. Self-chat and groups are ignored.\nif (msg.key?.fromMe === true) {\n  let oj = msg.key?.remoteJid || '';\n  if (oj.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) oj = msg.key.remoteJidAlt;\n  const od = oj.endsWith('@s.whatsapp.net') ? digits(oj.split('@')[0].split(':')[0]) : '';\n  const me = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  if (od && od !== me) {\n    return [{ json: { skip: true, reason: 'owner_message', phone: '+' + od, text: text.trim(), messageId: msg.key?.id || '' } }];\n  }\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
       }
     },
     {
@@ -935,7 +935,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ── Turn the SEND / EDIT / SKIP database result into either a send job or an owner message ──\nconst p = $('Parse Status Command').first().json;\nconst rows = $input.all().map(i => i.json).filter(x => x && x.r);\nconst ownerNum = String(p.ownerPhone || '').replace(/\\D/g, '');\nconst say = text => [{ json: { kind: 'reply', number: ownerNum, instanceName: p.instanceName, text } }];\n\nconst by = k => rows.find(x => x.r === k);\nconst locked = by('locked');\nif (locked) {\n  return [{ json: {\n    kind: 'send',\n    number: String(locked.phone).replace(/\\D/g, ''),\n    instanceName: p.instanceName,\n    text: locked.draft_text,\n    outreachId: locked.id,\n    code: locked.code,\n    name: locked.display_name || '',\n    ownerNum,\n    dailyLimit: p.dailyLimit\n  } }];\n}\nconst sk = by('skipped');\nif (sk) return say('⏭️ Skip kar diya: ' + (sk.display_name || 'contact') + ' (' + sk.code + '). Kuch nahi bheja.');\nconst ed = by('edited');\nif (ed) {\n  // Non-blocking check: factual claims in the edited text that are not in the brief Nikhil gave\n  const brief = String(ed.why || '').toLowerCase();\n  const t = String(ed.draft_text || '');\n  const unverified = [];\n  const add = (re, label) => { const m = t.match(re); if (m && !brief.includes(m[0].toLowerCase().replace(/\\s+/g, ' '))) unverified.push(label || m[0]); };\n  add(/\\d[\\d.,]*\\s?[kKmM]?\\+?\\s*(?:followers?|likes?|reviews?|subscribers?|customers?|orders?)/i);\n  for (const kw of ['domain', 'expired', 'google', 'facebook', 'instagram', 'youtube', 'ranking', 'traffic', 'competitor']) {\n    if (new RegExp('\\\\b' + kw + '\\\\b', 'i').test(t) && !brief.includes(kw)) unverified.push(kw);\n  }\n  if (/\\b(?:i|maine|main)\\s+(?:saw|noticed|checked|visited|found|dekha|dekhi|dekhe)\\b|\\bcame across\\b|\\bdiscovered\\b/i.test(t) && !/(?:saw|noticed|checked|visited|dekh|found|came across|discovered)/.test(brief)) unverified.push('\"saw/noticed/came across\"');\n  const warn = unverified.length ? '\\n\\n⚠️ Check karo: draft me ye baatein hain jo tumhare brief me nahi mili: ' + [...new Set(unverified)].join(', ') + '. Agar sahi nahi hain to EDIT karke hata do, warna client ko galat claim jayega.' : '';\n  return say('✏️ Draft update ho gaya (' + ed.code + '):\\n\\n' + ed.draft_text + warn + '\\n\\nBhejne ke liye: SEND ' + ed.code + '\\nDobara badalne ke liye: EDIT ' + ed.code + ' <text>\\nChhodne ke liye: SKIP ' + ed.code);\n}\n\nconst w = by('why');\nif (w) {\n  const nm = w.display_name || 'contact';\n  const M = {\n    'status:sent': 'Ye draft pehle hi bhej diya gaya hai (' + w.code + '). Dobara nahi bhejunga.',\n    'status:sending': 'Ye draft abhi bhej raha hai (' + w.code + '). Thoda ruko.',\n    'status:skipped': 'Ye draft skip ho chuka hai (' + w.code + ').',\n    'status:expired': 'Ye draft expire ho chuka hai. CLIENT command dubara chalao.',\n    'status:failed': 'Is draft ka bhejna fail hua tha. CLIENT command dubara chalao.',\n    'expired': 'Ye draft expire ho gaya (' + (p.ttlHours || 24) + ' ghante). CLIENT command dubara chalao.',\n    'dnc': nm + ' ne STOP / not interested bola hai (do_not_contact). Nahi bhej sakta.',\n    'blocked': nm + ' blocked hai. Nahi bhej sakta.',\n    'type': nm + ' friend/family/teacher hai. Promotional outreach nahi bhejta.',\n    'replied': nm + ' ne is beech reply kar diya hai, isliye follow-up nahi bhejunga. Unse seedha baat karo.',\n    'cooldown': nm + ' ko haal hi me outreach gaya hai (' + (p.cooldownDays || 14) + ' din cooldown). Abhi nahi bhej sakta.',\n    'cap': 'Aaj ki limit (' + (p.dailyLimit || 10) + ' messages) poori ho gayi. Kal SEND ' + w.code + ' karo (draft ' + (p.ttlHours || 24) + ' ghante me expire hota hai).',\n    'botoff': 'BOT OFF hai, isliye outreach bhi band hai. Pehle BOT ON karo, phir SEND ' + w.code + '.'\n  };\n  return say('⛔ ' + (M[w.why] || 'Ye draft abhi nahi bhej sakta.'));\n}\nconst n = Number((by('none') || {}).open_count) || 0;\nreturn say(n === 0 ? 'Koi pending draft nahi hai.' : n > 1 ? 'Ek se zyada drafts pending hain. Code likho, jaise: SEND a3f9c' : 'Ye code nahi mila. Draft ka code dobara dekho.');\n"
+        "jsCode": "// ── Turn the SEND / EDIT / SKIP database result into either a send job or an owner message ──\nconst p = $('Parse Status Command').first().json;\nconst rows = $input.all().map(i => i.json).filter(x => x && x.r);\nconst ownerNum = String(p.ownerPhone || '').replace(/\\D/g, '');\nconst say = text => [{ json: { kind: 'reply', number: ownerNum, instanceName: p.instanceName, text } }];\n\nconst by = k => rows.find(x => x.r === k);\nconst locked = by('locked');\nif (locked) {\n  const mailTo = String($('Validate & Extract').first().json.mailTo || '');\n  if (mailTo) {\n    const nm = locked.display_name || '';\n    return [{ json: {\n      kind: 'mail',\n      channel: 'mail',\n      sendTo: mailTo,\n      subject: 'Hello from Nikhil Paharia (websites & digital marketing)',\n      body: locked.draft_text + '\\n\\n--\\nNikhil Paharia\\nWeb Developer & Digital Marketer\\nhttps://www.nikhilpaharia.online\\n\\nIf you would rather not hear from me, just reply \"stop\" and I will not write again.',\n      instanceName: p.instanceName,\n      outreachId: locked.id,\n      code: locked.code,\n      name: nm,\n      ownerNum,\n      dailyLimit: p.dailyLimit\n    } }];\n  }\n  return [{ json: {\n    kind: 'send',\n    number: String(locked.phone).replace(/\\D/g, ''),\n    instanceName: p.instanceName,\n    text: locked.draft_text,\n    outreachId: locked.id,\n    code: locked.code,\n    name: locked.display_name || '',\n    ownerNum,\n    dailyLimit: p.dailyLimit\n  } }];\n}\nconst sk = by('skipped');\nif (sk) return say('⏭️ Skip kar diya: ' + (sk.display_name || 'contact') + ' (' + sk.code + '). Kuch nahi bheja.');\nconst ed = by('edited');\nif (ed) {\n  // Non-blocking check: factual claims in the edited text that are not in the brief Nikhil gave\n  const brief = String(ed.why || '').toLowerCase();\n  const t = String(ed.draft_text || '');\n  const unverified = [];\n  const add = (re, label) => { const m = t.match(re); if (m && !brief.includes(m[0].toLowerCase().replace(/\\s+/g, ' '))) unverified.push(label || m[0]); };\n  add(/\\d[\\d.,]*\\s?[kKmM]?\\+?\\s*(?:followers?|likes?|reviews?|subscribers?|customers?|orders?)/i);\n  for (const kw of ['domain', 'expired', 'google', 'facebook', 'instagram', 'youtube', 'ranking', 'traffic', 'competitor']) {\n    if (new RegExp('\\\\b' + kw + '\\\\b', 'i').test(t) && !brief.includes(kw)) unverified.push(kw);\n  }\n  if (/\\b(?:i|maine|main)\\s+(?:saw|noticed|checked|visited|found|dekha|dekhi|dekhe)\\b|\\bcame across\\b|\\bdiscovered\\b/i.test(t) && !/(?:saw|noticed|checked|visited|dekh|found|came across|discovered)/.test(brief)) unverified.push('\"saw/noticed/came across\"');\n  const warn = unverified.length ? '\\n\\n⚠️ Check karo: draft me ye baatein hain jo tumhare brief me nahi mili: ' + [...new Set(unverified)].join(', ') + '. Agar sahi nahi hain to EDIT karke hata do, warna client ko galat claim jayega.' : '';\n  return say('✏️ Draft update ho gaya (' + ed.code + '):\\n\\n' + ed.draft_text + warn + '\\n\\nBhejne ke liye: SEND ' + ed.code + '\\nDobara badalne ke liye: EDIT ' + ed.code + ' <text>\\nChhodne ke liye: SKIP ' + ed.code);\n}\n\nconst w = by('why');\nif (w) {\n  const nm = w.display_name || 'contact';\n  const M = {\n    'status:sent': 'Ye draft pehle hi bhej diya gaya hai (' + w.code + '). Dobara nahi bhejunga.',\n    'status:sending': 'Ye draft abhi bhej raha hai (' + w.code + '). Thoda ruko.',\n    'status:skipped': 'Ye draft skip ho chuka hai (' + w.code + ').',\n    'status:expired': 'Ye draft expire ho chuka hai. CLIENT command dubara chalao.',\n    'status:failed': 'Is draft ka bhejna fail hua tha. CLIENT command dubara chalao.',\n    'expired': 'Ye draft expire ho gaya (' + (p.ttlHours || 24) + ' ghante). CLIENT command dubara chalao.',\n    'dnc': nm + ' ne STOP / not interested bola hai (do_not_contact). Nahi bhej sakta.',\n    'blocked': nm + ' blocked hai. Nahi bhej sakta.',\n    'type': nm + ' friend/family/teacher hai. Promotional outreach nahi bhejta.',\n    'replied': nm + ' ne is beech reply kar diya hai, isliye follow-up nahi bhejunga. Unse seedha baat karo.',\n    'cooldown': nm + ' ko haal hi me outreach gaya hai (' + (p.cooldownDays || 14) + ' din cooldown). Abhi nahi bhej sakta.',\n    'cap': 'Aaj ki limit (' + (p.dailyLimit || 10) + ' messages) poori ho gayi. Kal SEND ' + w.code + ' karo (draft ' + (p.ttlHours || 24) + ' ghante me expire hota hai).',\n    'botoff': 'BOT OFF hai, isliye outreach bhi band hai. Pehle BOT ON karo, phir SEND ' + w.code + '.'\n  };\n  return say('⛔ ' + (M[w.why] || 'Ye draft abhi nahi bhej sakta.'));\n}\nconst n = Number((by('none') || {}).open_count) || 0;\nreturn say(n === 0 ? 'Koi pending draft nahi hai.' : n > 1 ? 'Ek se zyada drafts pending hain. Code likho, jaise: SEND a3f9c' : 'Ye code nahi mila. Draft ka code dobara dekho.');\n"
       },
       "id": "outreach_router",
       "name": "Outreach Router",
@@ -1039,7 +1039,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ── Owner confirmation after the send attempt ──\nconst j = $('Outreach Router').first().json;\nconst row = $input.first().json || {};\nconst ok = row.status === 'sent';\nconst text = ok\n  ? '✅ Bhej diya: ' + j.name + ' (' + j.code + ').\\nReply aane par AI sambhalega. Booking/final price tum hi confirm karoge.\\n📊 Aaj ' + ((Number(row.sent_today) || 0) + 1) + '/' + j.dailyLimit + ' bheje.'\n  : '❌ ' + (j.name || 'Contact') + ' ko bhejna fail hua (' + j.code + '). Cooldown lagu nahi hua. CLIENT command dubara chalao.';\nreturn [{ json: { number: j.ownerNum, instanceName: j.instanceName, text } }];\n"
+        "jsCode": "// ── Owner confirmation after the send attempt ──\nconst j = $('Outreach Router').first().json;\nconst row = $input.first().json || {};\nconst ok = row.status === 'sent';\nconst text = ok\n  ? (j.channel === 'mail'\n      ? '✅ Email bhej diya: ' + j.name + ' (' + j.code + ') → ' + j.sendTo + '.\\nReply tumhare Gmail me aayega, bot usse nahi sambhalta. Agar wo \"stop\" likhe to uska number DO NOT CONTACT me daalne ke liye mujhe bata dena.'\n      : '✅ Bhej diya: ' + j.name + ' (' + j.code + ').\\nReply aane par AI sambhalega. Booking/final price tum hi confirm karoge.') +\n    '\\n📊 Aaj ' + ((Number(row.sent_today) || 0) + 1) + '/' + j.dailyLimit + ' bheje.'\n  : '❌ ' + (j.name || 'Contact') + ' ko bhejna fail hua (' + j.code + '). Cooldown lagu nahi hua. CLIENT command dubara chalao.';\nreturn [{ json: { number: j.ownerNum, instanceName: j.instanceName, text } }];\n"
       },
       "id": "build_outreach_result",
       "name": "Build Outreach Result",
@@ -1226,6 +1226,82 @@
           "combinator": "and"
         },
         "options": {}
+      }
+    },
+    {
+      "id": "mail_now_if",
+      "name": "Mail now?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1800,
+        -200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "mail_now-cond",
+              "leftValue": "={{ $json.kind === 'mail' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "mail_gmail",
+      "name": "Send Outreach Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        -200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail_main",
+          "name": "Gmail account"
+        }
+      },
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.sendTo }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Nikhil Paharia"
+        }
+      }
+    },
+    {
+      "id": "mail_norm",
+      "name": "Normalize Mail Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        -200
+      ],
+      "parameters": {
+        "jsCode": "// Make the Gmail result look like the WhatsApp send result so 'Mark Sent' handles both.\nconst r = $input.first().json || {};\nconst ok = !!r.id && !r.error;\nreturn [{ json: ok ? { key: { id: 'mail:' + r.id } } : { error: String(r.error ? (r.error.message || JSON.stringify(r.error)) : 'gmail send failed').slice(0, 300) } }];"
       }
     }
   ],
@@ -1699,7 +1775,7 @@
         ],
         [
           {
-            "node": "Confirm Status to Owner",
+            "node": "Mail now?",
             "type": "main",
             "index": 0
           }
@@ -1813,6 +1889,46 @@
         [
           {
             "node": "Build AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mail now?": {
+      "main": [
+        [
+          {
+            "node": "Send Outreach Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Confirm Status to Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Outreach Email": {
+      "main": [
+        [
+          {
+            "node": "Normalize Mail Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Mail Result": {
+      "main": [
+        [
+          {
+            "node": "Mark Sent",
             "type": "main",
             "index": 0
           }

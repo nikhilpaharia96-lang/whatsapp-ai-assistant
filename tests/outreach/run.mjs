@@ -599,9 +599,50 @@ console.log('owner messages are remembered and pause the AI');
   });
 }
 
+console.log('email (Gmail) sending after approval');
+{
+  const db = await freshDb(); const f = makeFlow(db, { gemini: good(GOOD_LEAD) });
+  await f.ownerCommand('CLIENT: Ravi Sharma | 9876500009 | lead | no website ; city: Guwahati', { id: 'M1' }); const c = code(f); f.clear();
+  const hook = text => ({ json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: OWNER + '@s.whatsapp.net',
+    data: { key: { remoteJid: OWNER + '@s.whatsapp.net', fromMe: true, id: 'MM' + Math.random() }, message: { conversation: text }, messageType: 'conversation' } } } });
+  await t('MAIL <code> <email> is an owner command that behaves like SEND <code>; strangers cannot use it', async () => {
+    const v = (await f.run('Validate & Extract', [hook('MAIL ' + c + ' Ravi@Example.com')]))[0].json;
+    assert.equal(v.isStatusCommand, true); assert.equal(v.statusRaw, 'SEND ' + c); assert.equal(v.mailTo, 'ravi@example.com');
+    const stranger = { json: { query: { secret: 's' }, body: { event: 'messages.upsert', instance: 'I', sender: '919800000000@s.whatsapp.net', data: { key: { remoteJid: '919800000000@s.whatsapp.net', fromMe: false, id: 'S1' }, message: { conversation: 'MAIL ' + c + ' a@b.com' }, messageType: 'conversation' } } } };
+    assert.equal((await f.run('Validate & Extract', [stranger]))[0].json.isStatusCommand, undefined);
+    assert.equal((await f.run('Validate & Extract', [hook('MAIL ' + c + ' not-an-email')]))[0].json.isStatusCommand, undefined);
+  });
+  await t('approved mail is routed to Gmail (not WhatsApp), with the same gates, and recorded as sent', async () => {
+    const v = await f.run('Validate & Extract', [hook('MAIL ' + c + ' ravi@example.com')]); f.outs['Validate & Extract'] = v;
+    f.outs['Parse Status Command'] = await f.run('Parse Status Command', v);
+    const p = f.outs['Parse Status Command'][0]; assert.equal(p.json.action, 'outreach_send');
+    f.outs['Outreach Decide'] = await f.sql('Outreach Decide', [p]);
+    const r = (await f.run('Outreach Router', f.outs['Outreach Decide']))[0]; f.outs['Outreach Router'] = [r];
+    assert.equal(r.json.kind, 'mail'); assert.equal(r.json.sendTo, 'ravi@example.com'); assert.match(r.json.body, /Nikhil Paharia/); assert.match(r.json.body, /reply "stop"/);
+    assert.equal(evalExpr(N['Send now?'].parameters.conditions.conditions[0].leftValue, r.json, f.$), false); assert.equal(evalExpr(N['Mail now?'].parameters.conditions.conditions[0].leftValue, r.json, f.$), true);
+    const nm = (await f.run('Normalize Mail Result', [{ json: { id: 'gm123' } }]))[0].json; assert.equal(nm.key.id, 'mail:gm123');
+    f.outs['Send Outreach'] = [{ json: nm }]; f.outs['Mark Sent'] = await f.sql('Mark Sent', f.outs['Send Outreach']);
+    assert.equal(f.outs['Mark Sent'][0].json.status, 'sent');
+    const res = (await f.run('Build Outreach Result', f.outs['Mark Sent']))[0].json; assert.match(res.text, /Email bhej diya/); assert.match(res.text, /ravi@example.com/);
+    assert.equal((await rows(db, 'SELECT status FROM outreach'))[0].status, 'sent');
+    assert.equal(toClient(f).length, 0, 'nothing went out over WhatsApp');
+  });
+  await t('failed Gmail send is recorded as failed (no cooldown)', async () => {
+    const db2 = await freshDb(); const g = makeFlow(db2, { gemini: good(GOOD_LEAD) });
+    await g.ownerCommand('CLIENT: Ravi Sharma | 9876500009 | lead | no website', { id: 'M2' }); const c2 = code(g);
+    const v = await g.run('Validate & Extract', [hook('MAIL ' + c2 + ' ravi@example.com')]); g.outs['Validate & Extract'] = v;
+    g.outs['Parse Status Command'] = await g.run('Parse Status Command', v);
+    g.outs['Outreach Decide'] = await g.sql('Outreach Decide', [g.outs['Parse Status Command'][0]]);
+    g.outs['Outreach Router'] = await g.run('Outreach Router', g.outs['Outreach Decide']);
+    const nm = (await g.run('Normalize Mail Result', [{ json: { error: 'invalid_grant' } }]))[0].json; assert.ok(nm.error);
+    g.outs['Send Outreach'] = [{ json: nm }]; const ms = await g.sql('Mark Sent', g.outs['Send Outreach']); assert.equal(ms[0].json.status, 'failed');
+    assert.equal((await rows(db2, 'SELECT last_outreach_at FROM contacts WHERE phone = $1', ['+919876500009']))[0].last_outreach_at, null);
+  });
+}
+
 console.log('nothing else changed');
 await t('the original reply pipeline nodes are untouched', () => {
-  const touched = new Set(['Skip check', 'Duplicate message?', 'Load Conversation History', 'Parse AI Response', 'Outreach Decide', 'Outreach Router', 'Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
+  const touched = new Set(['Send now?', 'Build Outreach Result', 'Skip check', 'Duplicate message?', 'Load Conversation History', 'Parse AI Response', 'Outreach Decide', 'Outreach Router', 'Validate & Extract', 'Parse Status Command', 'Save Status', 'Build Status Confirmation', 'Load or Create Contact', 'Build AI Prompt']);
   const ref = process.env.BASELINE ? JSON.parse(fs.readFileSync(process.env.BASELINE, 'utf8')) : null;
   if (!ref) return;
   const R = Object.fromEntries(ref.nodes.map(n => [n.name, n]));
