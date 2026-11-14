@@ -117,3 +117,16 @@ The draft call returns `MESSAGE:` and `INSIGHT:`. The insight (which of Nikhil's
 ## Email via Gmail
 
 After a draft exists (CLIENT command), approve it by email instead of WhatsApp: `MAIL <code> name@example.com`. It goes through the same gates as SEND (opt-out, blocked, friend/family/teacher, 14-day cooldown, daily cap, BOT OFF) and is recorded as sent. The mail carries a signature and a "reply stop" line. Replies arrive in Gmail; the bot does not read or answer email. Uses the n8n "Gmail account" OAuth2 credential.
+
+## Email replies (AI answers leads who reply to a MAIL outreach)
+
+A second n8n workflow, **Email Replies (Gmail, AI)**, polls the Gmail inbox every minute.
+Source pieces live in `n8n-workflows/email-replies/`; `scripts/gen_email_workflow.py` assembles them into the n8n SDK code.
+
+- A reply is handled only if its Gmail thread is the thread of an outreach mail that was sent with `MAIL <code> <email>` (`outreach.wa_message_id = 'mail:<threadId>'`). All other email is ignored.
+- The AI answers in the same thread, using the full conversation history (WhatsApp and email), the same client rules, price rules and promise guard as the WhatsApp bot. Signature is added automatically.
+- Nikhil gets a WhatsApp note for every email reply (what the lead wrote, what the AI answered, escalation reason if any).
+- The AI stays silent (Nikhil is only notified) when: BOT is OFF, the contact is blocked or already do_not_contact, or 6 AI emails went out in 24 hours (loop guard).
+- "stop", "unsubscribe", "not interested" sets do_not_contact, skips open drafts and sends one polite confirmation.
+- Bounces, auto-replies, newsletters and our own sent mail are dropped. Quoted history is stripped before the AI sees the mail.
+- Tests: `PGLITE=... node tests/email/run.mjs` (23 tests).
