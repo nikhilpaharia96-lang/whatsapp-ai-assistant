@@ -141,5 +141,29 @@ await t('multi-chunk AI reply becomes one owner message', async () => {
   assert.equal(r.length, 1); assert.match(r[0].json.text, /A\n\nB/);
 });
 
+console.log('draft-only: owner pause and persona');
+await t('owner typing does NOT pause drafts in a draft-only chat, but still pauses a normal chat', async () => {
+  const set = (draftOnly, active) => { outs['Load or Create Contact'] = [{ json: { owner_active: active, metadata: draftOnly ? { draft_only: true } : {} } }]; };
+  set(false, true); assert.equal(cond('Owner chatting?', { json: {} }), true);
+  set(true, true); assert.equal(cond('Owner chatting?', { json: {} }), false);
+  set(true, false); assert.equal(cond('Owner chatting?', { json: {} }), false);
+  set(false, false); assert.equal(cond('Owner chatting?', { json: {} }), false);
+});
+await t('Draft Persona wraps the prompt only for draft-only contacts and leaves the rest of the request intact', async () => {
+  const item = { json: { geminiBody: { system_instruction: { parts: [{ text: 'ORIGINAL PROMPT' }] }, contents: [{ role: 'user', parts: [{ text: 'Kon' }] }], generationConfig: { temperature: 0.5 } }, phone: '+91', contactName: 'X' } };
+  outs['Load or Create Contact'] = [{ json: { metadata: {} } }];
+  assert.deepEqual((await run('Draft Persona', [item]))[0].json, item.json);
+  outs['Load or Create Contact'] = [{ json: { metadata: { draft_only: true } } }];
+  const r = (await run('Draft Persona', [item]))[0].json;
+  const sys = r.geminiBody.system_instruction.parts[0].text;
+  assert.match(sys, /^## DRAFT MODE/); assert.match(sys, /ORIGINAL PROMPT/); assert.match(sys, /NEVER invent facts/); assert.match(sys, /texted first/);
+  assert.deepEqual(r.geminiBody.contents, item.json.geminiBody.contents); assert.equal(r.phone, '+91');
+  assert.equal(item.json.geminiBody.system_instruction.parts[0].text, 'ORIGINAL PROMPT');   // input not mutated
+});
+await t('Draft Persona sits between Build AI Prompt and Gemini', () => {
+  assert.deepEqual(wf.connections['Build AI Prompt'].main[0].map(l => l.node), ['Draft Persona']);
+  assert.deepEqual(wf.connections['Draft Persona'].main[0].map(l => l.node), ['Gemini AI Response']);
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

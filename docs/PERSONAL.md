@@ -19,6 +19,6 @@ For chats you want to answer yourself (for example someone you are getting to kn
     DRAFT?                    list draft-only chats
 
 When that person messages, you receive "Draft reply" with what they said and the suggested answer. Copy, edit and send it yourself.
-The flag is stored in `contacts.metadata.draft_only`; name, type, notes and history are untouched. If you reply yourself the AI stays quiet for 7 minutes as usual.
+The flag is stored in `contacts.metadata.draft_only`; name, type, notes and history are untouched. In draft-only chats the 7-minute pause after you reply yourself does NOT apply: every message from them gets a draft. The draft is written in a special DRAFT MODE (one short casual suggestion, uses the chat history, never invents facts about you).
 
 Tests: `PGLITE=... node tests/personal/run.mjs`.

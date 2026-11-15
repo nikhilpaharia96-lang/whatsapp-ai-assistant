@@ -1214,7 +1214,7 @@
           "conditions": [
             {
               "id": "owner_chat_if-cond",
-              "leftValue": "={{ $('Load or Create Contact').first().json.owner_active === true }}",
+              "leftValue": "={{ $('Load or Create Contact').first().json.owner_active === true && String($('Load or Create Contact').first().json.metadata?.draft_only) !== 'true' }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -1546,6 +1546,19 @@
         760
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Draft-only chats: the AI writes a SUGGESTION for Nikhil. It is never sent to the contact. ──\nconst item = $input.first().json;\nconst c = $('Load or Create Contact').first().json;\nif (String(c.metadata && c.metadata.draft_only) !== 'true') return [{ json: item }];\nconst note = `## DRAFT MODE (this overrides the persona and tone described below)\nYou are NOT talking to this person. You are writing ONE suggested reply that Nikhil will read, edit and send himself.\n- Write it exactly as Nikhil would text: casual, warm, short (1 or 2 lines, under 200 characters), in the same language mix and register the other person uses (Hinglish in Roman script by default).\n- Read the conversation history carefully. Earlier \"model\" turns are messages Nikhil himself already sent. If Nikhil texted first, do NOT act as if they contacted him and do NOT ask who they are: answer what they just said.\n- NEVER invent facts about Nikhil or about them (hobbies, places, plans, job, age, photos). If a fact is needed, ask a short natural question instead.\n- No pickup lines, no pressure, no repeated pushing. If they say stop, no or not interested, suggest one polite short goodbye.\n- Output ONLY the message text. No quotes, no explanation, no options list.`;\nconst body = JSON.parse(JSON.stringify(item.geminiBody));\nconst sys = body.system_instruction.parts[0].text;\nbody.system_instruction.parts[0].text = note + '\\n\\n' + sys + '\\n\\n' + note;\nreturn [{ json: { ...item, geminiBody: body } }];\n"
+      },
+      "id": "draft_persona",
+      "name": "Draft Persona",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        700
+      ]
     }
   ],
   "connections": {
@@ -1689,7 +1702,7 @@
       "main": [
         [
           {
-            "node": "Gemini AI Response",
+            "node": "Draft Persona",
             "type": "main",
             "index": 0
           }
@@ -2310,6 +2323,17 @@
         [
           {
             "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft Persona": {
+      "main": [
+        [
+          {
+            "node": "Gemini AI Response",
             "type": "main",
             "index": 0
           }
