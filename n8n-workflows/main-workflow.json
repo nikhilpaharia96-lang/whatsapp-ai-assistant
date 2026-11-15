@@ -27,7 +27,7 @@
         300
       ],
       "parameters": {
-        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|mail\\s+[0-9a-f]{4,6}\\s+[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    // \"MAIL a3f9c name@example.com\" = approve draft a3f9c, but send it by email (Gmail) instead of WhatsApp\n    const mm = text.trim().match(/^mail\\s+([0-9a-f]{4,6})\\s+([^\\s@]+@[^\\s@]+\\.[^\\s@]+)$/i);\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: mm ? 'SEND ' + mm[1] : text.trim(),\n      mailTo: mm ? mm[2].toLowerCase() : '',\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Our own outgoing messages. Messages Nikhil types himself in a 1:1 chat are passed on ('owner_message') so they are\n//    saved to the conversation history (the AI then knows what he said) and pause the AI for a while.\n//    Echoes of the bot's own sends are removed again in 'Save Owner Message'. Self-chat and groups are ignored.\nif (msg.key?.fromMe === true) {\n  let oj = msg.key?.remoteJid || '';\n  if (oj.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) oj = msg.key.remoteJidAlt;\n  const od = oj.endsWith('@s.whatsapp.net') ? digits(oj.split('@')[0].split(':')[0]) : '';\n  const me = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  if (od && od !== me) {\n    return [{ json: { skip: true, reason: 'owner_message', phone: '+' + od, text: text.trim(), messageId: msg.key?.id || '' } }];\n  }\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
+        "jsCode": "// ── Validate webhook payload from Evolution API ──\nconst input = $input.first().json;\nconst body = input.body || input;\nconst digits = s => String(s || '').replace(/\\D/g, '');\n\n// 1. Shared-secret check. Evolution's global webhook URL carries ?secret=<WEBHOOK_SECRET>\n//    (see docker-compose.yml). Without this anyone could POST here and make the bot\n//    message arbitrary numbers.\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && input.query?.secret !== secret) {\n  return [{ json: { skip: true, reason: 'unauthorized' } }];\n}\n\n// 2. Only handle new-message events (Evolution sends 'messages.upsert' or 'MESSAGES_UPSERT')\nconst event = String(body?.event || '').toLowerCase().replace(/_/g, '.');\nif (event && event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\nif (!body?.data?.message) {\n  return [{ json: { skip: true, reason: 'not_a_message' } }];\n}\n\nconst msg = body.data;\nconst messageType = msg.messageType || 'conversation';\n\n// 3. Only handle text messages\nif (!['conversation', 'extendedTextMessage'].includes(messageType)) {\n  return [{ json: { skip: true, reason: 'unsupported_type', type: messageType } }];\n}\n\nconst text =\n  msg.message?.conversation ||\n  msg.message?.extendedTextMessage?.text ||\n  '';\nif (!text.trim()) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\n// 3b. Owner commands: \"STATUS: College mein hu | 3h\" and the auto-reply switch \"BOT OFF\" / \"BOT ON\" / \"BOT?\" (or just OFF / ON), and \\\"CLIENT: Name | number | what they need\\\" (AI messages that client). Only the owner may use it:\n//     - from another phone: the sender must be in YOUR_PHONE or STATUS_OWNER_NUMBERS\n//     - from the connected number itself: only in the \"message yourself\" chat\n//     Anyone else typing \"status: ...\" is handled like any normal message (no change).\nif (/^\\s*(?:status\\s*(?::|\\?|$)|(?:bot\\s+)?(?:on|off)\\s*$|bot\\s*\\?\\s*$|client\\s*:|coach\\s*:|draft\\s*\\?\\s*$|draft(?:\\s+off)?\\s+\\+?[\\d\\s-]{10,17}\\s*$|(?:save|contacts?)\\s*:|[^|\\n]{1,60}\\|\\s*\\+?[\\d\\s-]{10,17}\\s*\\|\\s*(?:dost|friend|yaar|family|teacher|sir|madam|professor|client|unknown)\\b|(?:send|skip)(?:\\s+[0-9a-f]{4,6})?\\s*$|mail\\s+[0-9a-f]{4,6}\\s+[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\s*$|edit\\s+[0-9a-f]{4,6}\\s+\\S)/i.test(text)) {\n  const numList = s => String(s || '').split(',').map(digits).filter(Boolean);\n  const owners = new Set([...numList($env.YOUR_PHONE), ...numList($env.STATUS_OWNER_NUMBERS)]);\n  let cjid = msg.key?.remoteJid || '';\n  if (cjid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n    cjid = msg.key.remoteJidAlt;\n  }\n  const chatDigits = cjid.endsWith('@s.whatsapp.net') ? digits(cjid.split('@')[0].split(':')[0]) : '';\n  const selfDigits = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  const fromMe = msg.key?.fromMe === true;\n  const authorized = !!chatDigits && (fromMe ? (!!selfDigits && chatDigits === selfDigits) : owners.has(chatDigits));\n  if (authorized) {\n    // \"MAIL a3f9c name@example.com\" = approve draft a3f9c, but send it by email (Gmail) instead of WhatsApp\n    const mm = text.trim().match(/^mail\\s+([0-9a-f]{4,6})\\s+([^\\s@]+@[^\\s@]+\\.[^\\s@]+)$/i);\n    return [{ json: {\n      skip: true,\n      reason: 'status_command',\n      isStatusCommand: true,\n      statusRaw: mm ? 'SEND ' + mm[1] : text.trim(),\n      mailTo: mm ? mm[2].toLowerCase() : '',\n      ownerPhone: '+' + chatDigits,\n      messageId: msg.key?.id || '',\n      instanceName: body.instance || 'default'\n    } }];\n  }\n}\n\n// 4. Our own outgoing messages. Messages Nikhil types himself in a 1:1 chat are passed on ('owner_message') so they are\n//    saved to the conversation history (the AI then knows what he said) and pause the AI for a while.\n//    Echoes of the bot's own sends are removed again in 'Save Owner Message'. Self-chat and groups are ignored.\nif (msg.key?.fromMe === true) {\n  let oj = msg.key?.remoteJid || '';\n  if (oj.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) oj = msg.key.remoteJidAlt;\n  const od = oj.endsWith('@s.whatsapp.net') ? digits(oj.split('@')[0].split(':')[0]) : '';\n  const me = digits(String(body.sender || '').split('@')[0].split(':')[0]);\n  if (od && od !== me) {\n    return [{ json: { skip: true, reason: 'owner_message', phone: '+' + od, text: text.trim(), messageId: msg.key?.id || '' } }];\n  }\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// 5. Only 1:1 chats. Groups (@g.us), status/broadcast and unresolved @lid JIDs are skipped.\nlet jid = msg.key?.remoteJid || '';\nif (jid.endsWith('@lid') && String(msg.key?.remoteJidAlt || '').endsWith('@s.whatsapp.net')) {\n  jid = msg.key.remoteJidAlt;\n}\nif (!jid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_a_direct_chat' } }];\n}\n\n// 5a. Automatic messages (business auto-reply menus, WhatsApp call-decline quick replies): never answer them,\n//     otherwise two bots keep replying to each other.\nconst autoReply =\n  /^\\s*welcome to\\b/i.test(text) ||\n  /(?:^|\\n)\\s*(?:please\\s+)?(?:reply|send|type|press)\\b[^\\n]{0,40}(?:\\s-\\s|\\s*:\\s|\\bwith\\b|\\bto (?:see|get|know|view|order)\\b)/i.test(text) ||\n  /\\b(?:auto[- ]?(?:reply|response|generated|message)|automated (?:message|reply|response)|this is an automatic)\\b/i.test(text) ||\n  /\\b(?:thank(?:s| you) for (?:contacting|messaging|reaching out to)|we(?:'ll| will) (?:get back|respond|reply)(?: to you)? (?:to you )?(?:soon|shortly|as soon)|our (?:business|working|office|store) hours)\\b/i.test(text) ||\n  /^\\s*(?:i'?ll call you (?:right )?back|i can'?t talk right now[^\\n]{0,30}|sorry,? i can'?t talk right now[^\\n]{0,30}|can i call you later|can'?t talk,? what'?s up)\\s*[.?!]*\\s*$/i.test(text);\nif (autoReply) {\n  return [{ json: { skip: true, reason: 'auto_reply' } }];\n}\n\n// 5b. Opt-out wording (\"STOP\", \"not interested\" ...). Acted on only for non friend/family/teacher contacts (see Load or Create Contact).\nconst optOut = /^\\s*(?:stop|unsubscribe)\\s*[.!]*\\s*$/i.test(text) ||\n  /\\b(?:not interested|no thanks|no thank you|don'?t (?:message|text|contact) me|do not (?:message|text|contact) me|stop (?:messaging|texting|contacting) me|interested nahi|mat bhejo|message mat karo)\\b/i.test(text);\n\n// JID looks like 1234567890@s.whatsapp.net (optionally 1234567890:12@s.whatsapp.net)\nconst phone = '+' + jid.split('@')[0].split(':')[0];\n\n// 6. Classify from FAMILY_NUMBERS / FRIEND_NUMBERS (existing non-'unknown' DB types win)\nconst toList = s => String(s || '').split(',').map(digits).filter(Boolean);\nconst d = digits(phone);\nconst contactTypeHint = toList($env.FAMILY_NUMBERS).includes(d) ? 'family'\n  : toList($env.FRIEND_NUMBERS).includes(d) ? 'friend'\n  : toList($env.TEACHER_NUMBERS).includes(d) ? 'teacher'\n  : 'unknown';\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    pushName: msg.pushName || '',\n    contactTypeHint,\n    optOut,\n    messageId: msg.key?.id,\n    text: text.trim(),\n    instanceName: body.instance || 'default',\n    timestamp: msg.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
       }
     },
     {
@@ -1303,6 +1303,249 @@
       "parameters": {
         "jsCode": "// Make the Gmail result look like the WhatsApp send result so 'Mark Sent' handles both.\nconst r = $input.first().json || {};\nconst ok = !!r.id && !r.error;\nreturn [{ json: ok ? { key: { id: 'mail:' + r.id } } : { error: String(r.error ? (r.error.message || JSON.stringify(r.error)) : 'gmail send failed').slice(0, 300) } }];"
       }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "personal_cmd-cond",
+              "leftValue": "={{ /^\\s*(?:coach\\s*:|draft\\b)/i.test(String($json.statusRaw || '')) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "personal_cmd",
+      "name": "Personal cmd?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        -700
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Parse COACH: / DRAFT commands (owner only; Validate & Extract already checked who sent it) ──\n//   COACH: <question>           -> private dating / social coaching, the answer goes only to the owner\n//   DRAFT <number>              -> draft-only chat: AI writes the reply for the owner, nothing is sent to that person\n//   DRAFT OFF <number> / DRAFT? -> switch off / list\nconst cmd = $input.first().json;\nconst base = { isStatusCommand: true, ownerPhone: cmd.ownerPhone, messageId: cmd.messageId || '', instanceName: cmd.instanceName, action: 'error', errorMsg: '' };\nconst fail = msg => [{ json: { ...base, action: 'error', errorMsg: msg } }];\nconst clean = x => String(x || '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').replace(/\\s+/g, ' ').trim();\nconst rawCmd = String(cmd.statusRaw || '').trim();\n\nconst cm = rawCmd.match(/^coach\\s*:\\s*([\\s\\S]*)$/i);\nif (cm) {\n  const q = clean(cm[1]).slice(0, 1200);\n  if (q.length < 3) return fail('Aise likho:\\nCOACH: kisi ko pehla message kaise bhejun?\\nCOACH: first date ke liye kya karun?\\nCOACH: mera dating profile bio likh do');\n  return [{ json: { ...base, action: 'coach', coachText: q } }];\n}\nconst dm = rawCmd.match(/^draft(?:\\s+(off))?\\s+\\+?([\\d\\s-]{10,17})$/i);\nif (dm || /^draft\\s*\\?$/i.test(rawCmd)) {\n  if (!dm) return [{ json: { ...base, action: 'draft_list' } }];\n  let dd = dm[2].replace(/\\D/g, '');\n  if (dd.length === 10) dd = '91' + dd;\n  if (dd.length < 11 || dd.length > 15) return fail('Number galat lag raha hai (country code ke saath likho).\\nAise likho: DRAFT 919876543210  (band karne ke liye: DRAFT OFF 919876543210)');\n  if (dd === String(cmd.ownerPhone || '').replace(/\\D/g, '')) return fail('Ye tumhara apna number hai.');\n  return [{ json: { ...base, action: dm[1] ? 'draft_off' : 'draft_on', draftPhone: '+' + dd } }];\n}\nreturn fail('Command samajh nahi aaya. Try: COACH: ... ya DRAFT 919876543210');\n"
+      },
+      "id": "personal_parse",
+      "name": "Parse Personal Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        -700
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "coach_cmd-cond",
+              "leftValue": "={{ $json.action === 'coach' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "coach_cmd",
+      "name": "Coach cmd?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        -700
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Private dating / social coach. Answers only the owner. Never contacts anyone else. ──\nconst p = $input.first().json;\nconst owner = String(p.ownerPhone || '').replace(/\\D/g, '');\nconst out = text => [{ json: { number: owner, instanceName: p.instanceName, text: String(text).slice(0, 3500) } }];\nconst key = $env.GEMINI_API_KEY;\nif (!key) return out('⚠️ Coach abhi kaam nahi kar raha: GEMINI_API_KEY set nahi hai.');\nconst yourName = $env.YOUR_NAME || 'Nikhil';\nconst system = `You are a warm, honest friend and dating/social coach for ${yourName}, a 21-year-old from Assam (BSc Chemistry student and freelance web developer). He wants to meet new people and find a girlfriend. Help him with: where and how to meet people, starting conversations, replies to messages, a dating-app bio, planning a first meeting, handling rejection, building confidence.\nRules:\n- Be practical and specific. When useful, give 2 or 3 ready-to-send message options (short, natural, not cheesy, no copy-paste pickup lines).\n- Respect, honesty and consent always. Never suggest manipulation, pressure, lying, \"games\", stalking, repeated messaging after a no, or anything that makes someone uncomfortable. If she says no or does not reply twice, advise him to move on politely.\n- Safety: for online matches suggest a video call first, a public place for the first meeting, telling a friend where he is going, and never sending money or OTPs.\n- Only about adults (18+). If it involves someone under 18, refuse and say so briefly.\n- Do not invent facts about him. If you need more info, ask ONE short question.\n- Reply in the same language style as him (Hinglish in Roman script by default). Under 900 characters unless he asks for more. Plain text, no markdown headings.`;\nconst base = ($env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\\/$/, '');\nconst models = [...new Set([$env.GEMINI_MODEL || 'gemini-3.8-flash', ...String($env.GEMINI_FALLBACK_MODELS || '').split(',').map(s => s.trim()).filter(Boolean)])];\nconst body = { system_instruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: p.coachText }] }], generationConfig: { maxOutputTokens: 1500, temperature: 0.8 } };\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nlet last = '';\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({ method: 'POST', url: base + '/models/' + encodeURIComponent(model) + ':generateContent', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body, json: true, timeout: 60000 });\n      const cand = res.candidates && res.candidates[0];\n      const text = ((cand && cand.content && cand.content.parts) || []).filter(x => !x.thought).map(x => x.text || '').join('').replace(/\\*\\*/g, '').trim();\n      if (text) return out('💬 Coach:\\n\\n' + text);\n      last = 'empty answer (' + ((res.promptFeedback && res.promptFeedback.blockReason) || (cand && cand.finishReason) || 'unknown') + ')';\n      break;\n    } catch (e) {\n      const status = Number(e.httpCode || e.statusCode || (e.cause && e.cause.status) || (String(e.message).match(/\\b([45]\\d\\d)\\b/) || [])[1]) || 0;\n      last = model + ': ' + (status || String(e.message).slice(0, 80));\n      if (status === 404 || (status && ![429, 500, 502, 503, 504].includes(status))) break;\n      if (attempt < 3) await sleep(2500 * attempt);\n    }\n  }\n}\nreturn out('⚠️ Coach abhi jawab nahi de paya (' + last + '). Thodi der baad dobara try karo.');\n"
+      },
+      "id": "coach_reply",
+      "name": "Coach Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        -700
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "draft_cmd-cond",
+              "leftValue": "={{ String($json.action || '').startsWith('draft_') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "draft_cmd",
+      "name": "Draft cmd?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1140,
+        -560
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cmd AS (\n  INSERT INTO bot_settings (key, value)\n  SELECT 'cmd:' || $3::text, 'done' WHERE $3::text <> '' AND $2::text IN ('on', 'off')\n  ON CONFLICT (key) DO NOTHING\n  RETURNING 1\n), c AS (\n  INSERT INTO contacts (phone, contact_type, metadata)\n  SELECT $1::text, 'unknown', jsonb_build_object('draft_only', true)\n  WHERE $2::text = 'on' AND (EXISTS (SELECT 1 FROM cmd) OR $3::text = '')\n  ON CONFLICT (phone) DO UPDATE SET metadata = contacts.metadata || jsonb_build_object('draft_only', true)\n  RETURNING phone, display_name, 'on'::text AS r\n), o AS (\n  UPDATE contacts SET metadata = metadata - 'draft_only'\n  WHERE $2::text = 'off' AND phone = $1::text AND (EXISTS (SELECT 1 FROM cmd) OR $3::text = '')\n  RETURNING phone, display_name, 'off'::text AS r\n)\nSELECT r, phone, display_name FROM c\nUNION ALL SELECT r, phone, display_name FROM o\nUNION ALL SELECT 'list', phone, display_name FROM contacts WHERE $2::text = 'list' AND metadata->>'draft_only' = 'true'\nUNION ALL SELECT 'duplicate', ''::text, ''::text WHERE $2::text IN ('on', 'off') AND $3::text <> '' AND NOT EXISTS (SELECT 1 FROM cmd)\nUNION ALL SELECT 'missing', $1::text, ''::text WHERE $2::text = 'off' AND NOT EXISTS (SELECT 1 FROM o) AND ($3::text = '' OR EXISTS (SELECT 1 FROM cmd));",
+        "options": {
+          "queryReplacement": "={{ [ $json.draftPhone || '', String($json.action).replace('draft_', ''), $json.messageId || '' ] }}"
+        }
+      },
+      "id": "draft_mode_save",
+      "name": "Save Draft Mode",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1360,
+        -560
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Confirmation for DRAFT / DRAFT OFF / DRAFT? ──\nconst p = $('Parse Personal Command').first().json;\nif (p.action === 'error') return [{ json: { number: String(p.ownerPhone || '').replace(/\\D/g, ''), instanceName: p.instanceName, text: '⚠️ ' + p.errorMsg } }];\nconst rows = $input.all().map(i => i.json).filter(r => r && r.r);\nif (rows.some(r => r.r === 'duplicate')) return [];            // Evolution retried the same message: confirm only once\nconst label = r => (r.display_name ? r.display_name + ' ' : '') + '(' + r.phone + ')';\nlet text;\nif (p.action === 'draft_list') {\n  const l = rows.filter(r => r.r === 'list');\n  text = l.length ? '📝 Draft-only chats (AI sirf tumhe draft bhejta hai):\\n' + l.map(r => '• ' + label(r)).join('\\n') + '\\n\\nBand karne ke liye: DRAFT OFF <number>'\n                  : 'ℹ️ Abhi koi chat draft-only mode me nahi hai. Chalu karne ke liye: DRAFT 919876543210';\n} else if (rows.some(r => r.r === 'on')) {\n  text = '✅ Draft-only ON: ' + label(rows.find(r => r.r === 'on')) + '\\nAb ye jo bhi message karenge, AI jawab ka draft sirf tumhe bhejega. Unhe kuch nahi jayega; tum khud bhejna.\\nBand karne ke liye: DRAFT OFF ' + p.draftPhone.replace('+', '');\n} else if (rows.some(r => r.r === 'off')) {\n  text = '✅ Draft-only OFF: ' + label(rows.find(r => r.r === 'off')) + '\\nAb AI inhe normal reply karega.';\n} else {\n  text = 'ℹ️ ' + p.draftPhone + ' draft-only mode me nahi tha.';\n}\nreturn [{ json: { number: String(p.ownerPhone || '').replace(/\\D/g, ''), instanceName: p.instanceName, text } }];\n"
+      },
+      "id": "draft_mode_reply",
+      "name": "Build Draft Mode Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        -560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "draft_only_if-cond",
+              "leftValue": "={{ String($('Load or Create Contact').first().json.metadata?.draft_only) === 'true' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "draft_only_if",
+      "name": "Draft only?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2600,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Draft-only chat: show the AI's reply to the owner instead of sending it to the contact ──\nconst items = $input.all().map(i => i.json);\nconst first = items[0] || {};\nconst owner = String($env.YOUR_PHONE || '').split(',')[0].replace(/\\D/g, '');\nif (!owner) throw new Error('YOUR_PHONE is not set; cannot send draft to owner');\nconst reply = String(first.aiReply || items.map(i => i.chunk).join('\\n\\n')).slice(0, 1500);\nconst who = (first.contactName ? first.contactName + ' ' : '') + '(' + (first.phone || '') + ')';\nconst text = '✍️ Draft reply, ' + who + '\\n💬 Unhone kaha: ' + String(first.originalText || '').slice(0, 500) + '\\n\\nDraft:\\n' + reply + '\\n\\n⚠️ Ye unhe NAHI bheja gaya. Pasand aaye to copy karke khud bhejo (ya badlo).';\nreturn [{ json: { number: owner, instanceName: first.instanceName, text } }];\n"
+      },
+      "id": "draft_notice",
+      "name": "Build Draft Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2820,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ encodeURIComponent($json.instanceName) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.number, text: $json.text, delay: 500 }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "draft_notice_send",
+      "name": "Send Draft to Owner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3040,
+        760
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -1468,7 +1711,7 @@
       "main": [
         [
           {
-            "node": "Send WhatsApp Reply",
+            "node": "Draft only?",
             "type": "main",
             "index": 0
           }
@@ -1581,7 +1824,7 @@
       "main": [
         [
           {
-            "node": "Parse Status Command",
+            "node": "Personal cmd?",
             "type": "main",
             "index": 0
           }
@@ -1929,6 +2172,144 @@
         [
           {
             "node": "Mark Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Personal cmd?": {
+      "main": [
+        [
+          {
+            "node": "Parse Personal Command",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Status Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Personal Command": {
+      "main": [
+        [
+          {
+            "node": "Coach cmd?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coach cmd?": {
+      "main": [
+        [
+          {
+            "node": "Coach Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Draft cmd?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coach Reply": {
+      "main": [
+        [
+          {
+            "node": "Confirm Status to Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft cmd?": {
+      "main": [
+        [
+          {
+            "node": "Save Draft Mode",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Draft Mode Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Draft Mode": {
+      "main": [
+        [
+          {
+            "node": "Build Draft Mode Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Draft Mode Reply": {
+      "main": [
+        [
+          {
+            "node": "Confirm Status to Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft only?": {
+      "main": [
+        [
+          {
+            "node": "Build Draft Notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Draft Notice": {
+      "main": [
+        [
+          {
+            "node": "Send Draft to Owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Draft to Owner": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
             "type": "main",
             "index": 0
           }
