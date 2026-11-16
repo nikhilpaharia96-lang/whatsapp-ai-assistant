@@ -22,3 +22,15 @@ When that person messages, you receive "Draft reply" with what they said and the
 The flag is stored in `contacts.metadata.draft_only`; name, type, notes and history are untouched. In draft-only chats the 7-minute pause after you reply yourself does NOT apply: every message from them gets a draft. The draft is written in a special DRAFT MODE (one short casual suggestion, uses the chat history, never invents facts about you).
 
 Tests: `PGLITE=... node tests/personal/run.mjs`.
+
+## Voice notes and images
+
+Incoming voice notes and images from contacts are turned into text before the normal pipeline (node `Media Prep`, right after the webhook):
+the file is fetched from Evolution API (`POST /chat/getBase64FromMediaMessage/<instance>`), Gemini transcribes (voice) or describes (image),
+and the message becomes `[Voice note] ...` or `[Image: ...] Caption: ...`. The AI then replies as to any text message; history shows the same text.
+
+- Not handled (still ignored): video, stickers, documents, groups, your own media.
+- Limits: voice notes up to 180 s (`MEDIA_MAX_AUDIO_SECONDS`), files up to 10 MB (`MEDIA_MAX_MB`).
+- If anything fails the AI is told the media could not be processed and asks the person to type.
+- Privacy: the media content is sent to Gemini for transcription/description.
+- Test: `node tests/media/run.mjs`.
