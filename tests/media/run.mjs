@@ -23,8 +23,8 @@ const msgOf = r => r[0].json.body.data.message.conversation;
 
 console.log('graph');
 await t('Webhook -> Media Prep -> Validate & Extract', () => {
-  assert.deepEqual(wf.connections['WhatsApp Webhook'].main[0].map(l => l.node), ['Media Prep']);
-  assert.deepEqual(wf.connections['Media Prep'].main[0].map(l => l.node), ['Validate & Extract']);
+  assert.deepEqual(wf.connections['WhatsApp Webhook'].main[0].map(l => l.node), ['Detect Class Note']);
+  assert.deepEqual(wf.connections['Media Prep'].main[0].map(l => l.node), ['Class note?']); assert.deepEqual(wf.connections['Class note?'].main[1].map(l => l.node), ['Validate & Extract']);
 });
 
 console.log('media');

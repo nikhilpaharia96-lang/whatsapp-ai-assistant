@@ -16,7 +16,7 @@ if (String(body.event || '').toLowerCase().replace(/_/g, '.') !== 'messages.upse
 
 const type = data.messageType;
 if (type !== 'audioMessage' && type !== 'imageMessage') return pass();
-if (data.key.fromMe === true) return pass();                         // our own media is never processed
+if (data.key.fromMe === true) return pass();                         // our own media is never processed (class recordings: see Detect Class Note)
 const jid = String(data.key.remoteJid || '');
 if (jid.endsWith('@g.us') || jid.indexOf('@broadcast') >= 0 || jid === 'status@broadcast') return pass();   // groups/status: skipped later
 
