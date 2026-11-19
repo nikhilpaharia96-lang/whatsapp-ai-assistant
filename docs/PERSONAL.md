@@ -44,3 +44,8 @@ It sends a "notes ban rahe hain" message, fetches the audio from Evolution, give
 builds a plain A4 PDF (title, headings, bullets, quick revision) and sends it back as a WhatsApp document. If the PDF cannot be sent the notes come as text;
 on any failure you get an error message. PDF is Latin text only (Hinglish/Roman script is fine; native scripts would show "?").
 Test: `node tests/classnotes/run.mjs`. Ask permission before recording a class or office meeting.
+
+### Draft copy (draft-only chats)
+The owner gets two WhatsApp messages: an info message (who, what they said, "not sent") and then the draft ALONE as its own message,
+so one long-press -> Copy copies exactly the draft. A real tap-to-copy button is not possible yet: Evolution API v2.3.7 has a known
+bug where interactive buttons fail (evolution-api issue #2390), and WhatsApp only shows "Copy" buttons for official Business API templates.

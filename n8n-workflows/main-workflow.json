@@ -1505,7 +1505,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ── Draft-only chat: show the AI's reply to the owner instead of sending it to the contact ──\nconst items = $input.all().map(i => i.json);\nconst first = items[0] || {};\nconst owner = String($env.YOUR_PHONE || '').split(',')[0].replace(/\\D/g, '');\nif (!owner) throw new Error('YOUR_PHONE is not set; cannot send draft to owner');\nconst reply = String(first.aiReply || items.map(i => i.chunk).join('\\n\\n')).slice(0, 1500);\nconst who = (first.contactName ? first.contactName + ' ' : '') + '(' + (first.phone || '') + ')';\nconst text = '✍️ Draft reply, ' + who + '\\n💬 Unhone kaha: ' + String(first.originalText || '').slice(0, 500) + '\\n\\nDraft:\\n' + reply + '\\n\\n⚠️ Ye unhe NAHI bheja gaya. Pasand aaye to copy karke khud bhejo (ya badlo).';\nreturn [{ json: { number: owner, instanceName: first.instanceName, text } }];\n"
+        "jsCode": "// ── Draft-only chat: show the AI's reply to the owner instead of sending it to the contact ──\nconst items = $input.all().map(i => i.json);\nconst first = items[0] || {};\nconst owner = String($env.YOUR_PHONE || '').split(',')[0].replace(/\\D/g, '');\nif (!owner) throw new Error('YOUR_PHONE is not set; cannot send draft to owner');\nconst reply = String(first.aiReply || items.map(i => i.chunk).join('\\n\\n')).slice(0, 1500);\nconst who = (first.contactName ? first.contactName + ' ' : '') + '(' + (first.phone || '') + ')';\nconst text = '✍️ Draft reply, ' + who + '\\n💬 Unhone kaha: ' + String(first.originalText || '').slice(0, 500) + '\\n\\n⬇️ Neeche wala message SIRF draft hai: usko dabake rakho → Copy → unki chat mein paste karo.\\n⚠️ Ye unhe NAHI bheja gaya.';\nreturn [{ json: { number: owner, instanceName: first.instanceName, text, draftText: reply } }];\n"
       },
       "id": "draft_notice",
       "name": "Build Draft Notice",
@@ -1645,6 +1645,37 @@
           "waitForSubWorkflow": false
         }
       },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ encodeURIComponent($('Build Draft Notice').first().json.instanceName) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('Build Draft Notice').first().json.number, text: $('Build Draft Notice').first().json.draftText, delay: 1200 }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "draft_text_send",
+      "name": "Send Draft Text Only",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3260,
+        760
+      ],
       "onError": "continueRegularOutput"
     }
   ],
@@ -2409,7 +2440,7 @@
       "main": [
         [
           {
-            "node": "Respond 200 OK",
+            "node": "Send Draft Text Only",
             "type": "main",
             "index": 0
           }
@@ -2468,6 +2499,17 @@
       ]
     },
     "Start Class Notes": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Draft Text Only": {
       "main": [
         [
           {

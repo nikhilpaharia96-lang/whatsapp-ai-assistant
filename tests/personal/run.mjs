@@ -45,7 +45,7 @@ await t('new nodes are wired: coach -> owner, draft mode -> owner, draft-only AI
   assert.deepEqual(to('Draft cmd?'), ['Save Draft Mode']); assert.deepEqual(to('Draft cmd?', 1), ['Build Draft Mode Reply']); assert.deepEqual(to('Build Draft Mode Reply'), ['Confirm Status to Owner']);
   assert.deepEqual(to('Parse AI Response'), ['Draft only?']);
   assert.deepEqual(to('Draft only?'), ['Build Draft Notice']); assert.deepEqual(to('Draft only?', 1), ['Send WhatsApp Reply']);
-  assert.deepEqual(to('Send Draft to Owner'), ['Respond 200 OK']);
+  assert.deepEqual(to('Send Draft to Owner'), ['Send Draft Text Only']); assert.deepEqual(to('Send Draft Text Only'), ['Respond 200 OK']);
 });
 
 console.log('commands');
@@ -134,11 +134,11 @@ await t('a message from a draft-only contact is routed to the owner draft path, 
 await t('draft notice goes to the owner with the contact message and the draft, and says it was not sent', async () => {
   const r = await run('Build Draft Notice', [{ json: { aiReply: 'Hi! Kaisi ho?', chunk: 'Hi! Kaisi ho?', contactName: 'Riya', phone: P, originalText: 'hey kya kar rahe ho', instanceName: 'Inst' } }]);
   assert.equal(r.length, 1); assert.equal(r[0].json.number, OWNER); assert.equal(r[0].json.instanceName, 'Inst');
-  assert.match(r[0].json.text, /Riya/); assert.match(r[0].json.text, /hey kya kar rahe ho/); assert.match(r[0].json.text, /Hi! Kaisi ho\?/); assert.match(r[0].json.text, /NAHI bheja/);
+  assert.match(r[0].json.text, /Riya/); assert.match(r[0].json.text, /hey kya kar rahe ho/); assert.equal(r[0].json.draftText, 'Hi! Kaisi ho?'); assert.ok(!/Hi! Kaisi ho\?/.test(r[0].json.text)); assert.match(r[0].json.text, /NAHI bheja/);
 });
 await t('multi-chunk AI reply becomes one owner message', async () => {
   const r = await run('Build Draft Notice', [{ json: { aiReply: 'A\n\nB', chunk: 'A', phone: P, instanceName: 'I' } }, { json: { aiReply: 'A\n\nB', chunk: 'B', phone: P, instanceName: 'I' } }]);
-  assert.equal(r.length, 1); assert.match(r[0].json.text, /A\n\nB/);
+  assert.equal(r.length, 1); assert.equal(r[0].json.draftText, 'A\n\nB');
 });
 
 console.log('draft-only: owner pause and persona');
