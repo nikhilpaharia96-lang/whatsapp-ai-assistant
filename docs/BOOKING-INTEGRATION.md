@@ -44,3 +44,12 @@ nginx: no change needed — `/webhook/` is already public + rate-limited; the HM
 - The bot only knows what is in `database/init.sql` (portfolio table) and the booking note. Put your real
   prices/policies there, or it will (rightly) say you'll confirm personally.
 - The webhook never carries the client's email or free-text project description (privacy + prompt-injection).
+
+## More portfolio automations (live on the Railway n8n)
+Same secret (`BOOKING_WEBHOOK_SECRET`) and same signature scheme as the booking webhook.
+- **Booking Confirmed → WhatsApp** (`/webhook/booking-confirmed`, id 42twN82uiQnfo68c) = `n8n-workflows/booking-notify.json`.
+- **Website Enquiry → WhatsApp Alert** (`/webhook/inquiry-created`, id 11EFyeWsDFcGPh8Z): WhatsApps *you* the new lead (structured facts only, no free text)
+  and a ready-to-copy `CLIENT: name | number | lead | Wants ...` command. The assistant never messages the lead on its own.
+- **Portfolio Daily Follow-up Digest** (id rmQAUeWIPkbs4GR6): every day 09:00 IST it calls `GET $PORTFOLIO_BASE_URL/api/admin/digest`
+  (signed `HMAC(secret, "<timestamp>.digest")`) and WhatsApps you follow-ups due, new enquiries and pending balances. Sends nothing when there is nothing to report.
+  Needs n8n variable `PORTFOLIO_BASE_URL=https://<your-site>` (and the portfolio branch `feat/n8n-inquiry-and-followup-alerts` deployed).
