@@ -1387,7 +1387,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ── Private dating / social coach. Answers only the owner. Never contacts anyone else. ──\nconst p = $input.first().json;\nconst owner = String(p.ownerPhone || '').replace(/\\D/g, '');\nconst out = text => [{ json: { number: owner, instanceName: p.instanceName, text: String(text).slice(0, 3500) } }];\nconst key = $env.GEMINI_API_KEY;\nif (!key) return out('⚠️ Coach abhi kaam nahi kar raha: GEMINI_API_KEY set nahi hai.');\nconst yourName = $env.YOUR_NAME || 'Nikhil';\nconst system = `You are a warm, honest friend and dating/social coach for ${yourName}, a 21-year-old from Assam (BSc Chemistry student and freelance web developer). He wants to meet new people and find a girlfriend. Help him with: where and how to meet people, starting conversations, replies to messages, a dating-app bio, planning a first meeting, handling rejection, building confidence.\nRules:\n- Be practical and specific. When useful, give 2 or 3 ready-to-send message options (short, natural, not cheesy, no copy-paste pickup lines).\n- Respect, honesty and consent always. Never suggest manipulation, pressure, lying, \"games\", stalking, repeated messaging after a no, or anything that makes someone uncomfortable. If she says no or does not reply twice, advise him to move on politely.\n- Safety: for online matches suggest a video call first, a public place for the first meeting, telling a friend where he is going, and never sending money or OTPs.\n- Only about adults (18+). If it involves someone under 18, refuse and say so briefly.\n- Do not invent facts about him. If you need more info, ask ONE short question.\n- Reply in the same language style as him (Hinglish in Roman script by default). Under 900 characters unless he asks for more. Plain text, no markdown headings.`;\nconst base = ($env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\\/$/, '');\nconst models = [...new Set([$env.GEMINI_MODEL || 'gemini-3.8-flash', ...String($env.GEMINI_FALLBACK_MODELS || '').split(',').map(s => s.trim()).filter(Boolean)])];\nconst body = { system_instruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: p.coachText }] }], generationConfig: { maxOutputTokens: 1500, temperature: 0.8 } };\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nlet last = '';\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({ method: 'POST', url: base + '/models/' + encodeURIComponent(model) + ':generateContent', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body, json: true, timeout: 60000 });\n      const cand = res.candidates && res.candidates[0];\n      const text = ((cand && cand.content && cand.content.parts) || []).filter(x => !x.thought).map(x => x.text || '').join('').replace(/\\*\\*/g, '').trim();\n      if (text) return out('💬 Coach:\\n\\n' + text);\n      last = 'empty answer (' + ((res.promptFeedback && res.promptFeedback.blockReason) || (cand && cand.finishReason) || 'unknown') + ')';\n      break;\n    } catch (e) {\n      const status = Number(e.httpCode || e.statusCode || (e.cause && e.cause.status) || (String(e.message).match(/\\b([45]\\d\\d)\\b/) || [])[1]) || 0;\n      last = model + ': ' + (status || String(e.message).slice(0, 80));\n      if (status === 404 || (status && ![429, 500, 502, 503, 504].includes(status))) break;\n      if (attempt < 3) await sleep(2500 * attempt);\n    }\n  }\n}\nreturn out('⚠️ Coach abhi jawab nahi de paya (' + last + '). Thodi der baad dobara try karo.');\n"
+        "jsCode": "// ── Private dating / social coach. Answers only the owner. Never contacts anyone else. ──\nconst p = $input.first().json;\nconst owner = String(p.ownerPhone || '').replace(/\\D/g, '');\nconst out = text => [{ json: { number: owner, instanceName: p.instanceName, text: String(text).slice(0, 3500) } }];\nconst key = $env.GEMINI_API_KEY;\nif (!key) return out('⚠️ Coach abhi kaam nahi kar raha: GEMINI_API_KEY set nahi hai.');\nconst yourName = $env.YOUR_NAME || 'Nikhil';\nconst system = `You are a warm, honest friend and dating/social coach for ${yourName}, a 21-year-old from Assam (BSc Chemistry student and freelance web developer). He wants to meet new people and find a girlfriend. Help him with: where and how to meet people, starting conversations, replies to messages, a dating-app bio, planning a first meeting, handling rejection, building confidence.\nRules:\n- Be practical and specific. When useful, give 2 or 3 ready-to-send message options (short, natural, not cheesy, no copy-paste pickup lines).\n- Respect, honesty and consent always. Never suggest manipulation, pressure, lying, \"games\", stalking, repeated messaging after a no, or anything that makes someone uncomfortable. If she says no or does not reply twice, advise him to move on politely.\n- Safety: for online matches suggest a video call first, a public place for the first meeting, telling a friend where he is going, and never sending money or OTPs.\n- Only about adults (18+). If it involves someone under 18, refuse and say so briefly.\n- Do not invent facts about him. In sample messages NEVER make up his hobbies, interests, trips, jobs or past events: use placeholders like [apna interest] or [jagah] he can fill in. If you need more info, ask ONE short question.\n- Reply in the same language style as him (Hinglish in Roman script by default). Under 900 characters unless he asks for more. Plain text, no markdown headings.`;\nconst base = ($env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\\/$/, '');\nconst models = [...new Set([$env.GEMINI_MODEL || 'gemini-3.8-flash', ...String($env.GEMINI_FALLBACK_MODELS || '').split(',').map(s => s.trim()).filter(Boolean)])];\nconst body = { system_instruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: p.coachText }] }], generationConfig: { maxOutputTokens: 1500, temperature: 0.8 } };\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nlet last = '';\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({ method: 'POST', url: base + '/models/' + encodeURIComponent(model) + ':generateContent', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body, json: true, timeout: 60000 });\n      const cand = res.candidates && res.candidates[0];\n      const text = ((cand && cand.content && cand.content.parts) || []).filter(x => !x.thought).map(x => x.text || '').join('').replace(/\\*\\*/g, '').trim();\n      if (text) return out('💬 Coach:\\n\\n' + text);\n      last = 'empty answer (' + ((res.promptFeedback && res.promptFeedback.blockReason) || (cand && cand.finishReason) || 'unknown') + ')';\n      break;\n    } catch (e) {\n      const status = Number(e.httpCode || e.statusCode || (e.cause && e.cause.status) || (String(e.message).match(/\\b([45]\\d\\d)\\b/) || [])[1]) || 0;\n      last = model + ': ' + (status || String(e.message).slice(0, 80));\n      if (status === 404 || (status && ![429, 500, 502, 503, 504].includes(status))) break;\n      if (attempt < 3) await sleep(2500 * attempt);\n    }\n  }\n}\nreturn out('⚠️ Coach abhi jawab nahi de paya (' + last + '). Thodi der baad dobara try karo.');\n"
       },
       "id": "coach_reply",
       "name": "Coach Reply",
@@ -1584,7 +1584,7 @@
         300
       ],
       "parameters": {
-        "jsCode": "// A long voice note the owner records in the \"message yourself\" chat = a whole class -> goes to the Class Notes workflow (PDF notes).\n// Everything else is passed on unchanged.\nconst item = $input.first().json;\nconst body = item.body || item;\nconst data = body && body.data;\nconst pass = () => [{ json: item }];\nif (!data || !data.key || !data.message || data.messageType !== 'audioMessage' || data.key.fromMe !== true) return pass();\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && (item.query || {}).secret !== secret) return pass();\nif (String(body.event || '').toLowerCase().replace(/_/g, '.') !== 'messages.upsert') return pass();\nconst dg = s => String(s || '').replace(/\\D/g, '');\nlet cj = String(data.key.remoteJid || '');\nif (cj.endsWith('@lid') && String(data.key.remoteJidAlt || '').endsWith('@s.whatsapp.net')) cj = data.key.remoteJidAlt;\nconst chat = cj.endsWith('@s.whatsapp.net') ? dg(cj.split('@')[0].split(':')[0]) : '';\nconst me = dg(String(body.sender || '').split('@')[0].split(':')[0]);\nconst secs = Number((data.message.audioMessage || {}).seconds) || 0;\nif (chat && chat === me && secs >= (Number($env.CLASS_NOTES_MIN_SECONDS) || 120)) {\n  return [{ json: { classNotes: true, number: chat, instanceName: body.instance || $env.EVOLUTION_INSTANCE_NAME || 'default', messageId: data.key.id || '', seconds: secs } }];\n}\nreturn pass();\n"
+        "jsCode": "// Owner's \"message yourself\" chat only (everything else is passed on unchanged):\n//  - a long voice note = a whole class -> Class Notes workflow (PDF notes)\n//  - the text HELP / COMMANDS / LEADS -> owner info commands (answered without the AI)\nconst item = $input.first().json;\nconst body = item.body || item;\nconst data = body && body.data;\nconst pass = () => [{ json: item }];\nif (!data || !data.key || !data.message || data.key.fromMe !== true) return pass();\nconst secret = $env.WEBHOOK_SECRET || '';\nif (secret && (item.query || {}).secret !== secret) return pass();\nif (String(body.event || '').toLowerCase().replace(/_/g, '.') !== 'messages.upsert') return pass();\nconst dg = s => String(s || '').replace(/\\D/g, '');\nlet cj = String(data.key.remoteJid || '');\nif (cj.endsWith('@lid') && String(data.key.remoteJidAlt || '').endsWith('@s.whatsapp.net')) cj = data.key.remoteJidAlt;\nconst chat = cj.endsWith('@s.whatsapp.net') ? dg(cj.split('@')[0].split(':')[0]) : '';\nconst me = dg(String(body.sender || '').split('@')[0].split(':')[0]);\nif (!chat || chat !== me) return pass();\nconst instanceName = body.instance || $env.EVOLUTION_INSTANCE_NAME || 'default';\nif (data.messageType === 'audioMessage') {\n  const secs = Number((data.message.audioMessage || {}).seconds) || 0;\n  if (secs >= (Number($env.CLASS_NOTES_MIN_SECONDS) || 120)) {\n    return [{ json: { classNotes: true, number: chat, instanceName, messageId: data.key.id || '', seconds: secs } }];\n  }\n  return pass();\n}\nconst text = String(data.message.conversation || (data.message.extendedTextMessage || {}).text || '').trim();\nif (/^(?:help|commands?|leads?)\\s*[?!.]?$/i.test(text)) {\n  return [{ json: { ownerCmd: true, isStatusCommand: true, statusRaw: text, ownerPhone: '+' + chat, messageId: data.key.id || '', instanceName } }];\n}\nreturn pass();\n"
       },
       "onError": "continueRegularOutput"
     },
@@ -1677,6 +1677,87 @@
         760
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "id": "node_info_if",
+      "name": "Info cmd?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        570,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ic1",
+              "leftValue": "={{ $json.ownerCmd === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node_info_parse",
+      "name": "Parse Info Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        790,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// Parse HELP / LEADS (owner only; Detect Class Note already checked it is a self-chat message)\nconst cmd = $input.first().json;\nconst raw = String(cmd.statusRaw || '').trim();\nconst base = { isStatusCommand: true, ownerPhone: cmd.ownerPhone, messageId: cmd.messageId || '', instanceName: cmd.instanceName };\nif (/^(?:help|commands?)\\s*[?!.]?$/i.test(raw)) return [{ json: { ...base, action: 'help' } }];\nif (/^leads?\\s*[?!.]?$/i.test(raw)) return [{ json: { ...base, action: 'leads' } }];\nreturn [{ json: { ...base, action: 'error', errorMsg: 'Command samajh nahi aaya.' } }];\n"
+      }
+    },
+    {
+      "id": "node_info_load",
+      "name": "Load Info",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1010,
+        420
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH pend AS (SELECT COUNT(*)::int AS n FROM outreach WHERE status = 'draft' AND expires_at > NOW())\nSELECT c.display_name, c.phone, c.business_name, c.last_active, c.do_not_contact,\n       (SELECT o.status FROM outreach o WHERE o.contact_id = c.id ORDER BY o.created_at DESC LIMIT 1) AS last_outreach,\n       (SELECT o.sent_at FROM outreach o WHERE o.contact_id = c.id AND o.status = 'sent' ORDER BY o.sent_at DESC LIMIT 1) AS last_sent,\n       (SELECT n FROM pend) AS pending\nFROM (SELECT 1) one\nLEFT JOIN contacts c ON c.contact_type = 'client' AND NOT c.is_blocked\nORDER BY c.last_active DESC NULLS LAST\nLIMIT 15;\n",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres_main",
+          "name": "PostgreSQL"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "node_info_reply",
+      "name": "Build Info Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1230,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// HELP = all commands. LEADS = who is a client/lead, when they last wrote, what happened with the last outreach.\nconst p = $('Parse Info Command').first().json;\nconst out = text => [{ json: { number: String(p.ownerPhone || '').replace(/\\D/g, ''), instanceName: p.instanceName, text: String(text).slice(0, 3800) } }];\nif (p.action === 'help') {\n  return out([\n    '📋 Saari commands (apne \"Message yourself\" chat mein):',\n    '',\n    '🤖 Bot: BOT ON / BOT OFF / BOT? / STATUS:',\n    '👥 Contacts: SAVE: naam | number | friend/family/teacher/client',\n    '💼 Clients: CLIENT: Naam | 10-digit number | lead | kya chahiye (AI pehla message DRAFT banata hai)',\n    '✅ Draft approve: SEND <code>  |  EDIT <code> <naya text>  |  SKIP <code>  |  MAIL <code> <email>',\n    '✍️ Draft-only chat: DRAFT <number>  |  DRAFT OFF <number>  |  DRAFT?',\n    '💬 Coach: COACH: <sawal>',\n    '📊 LEADS = clients/leads ki list  |  HELP = ye list',\n    '',\n    '🎙 Class notes: Message yourself mein 2+ minute ka voice note bhejo, notes ka PDF aayega.',\n    '(<code> = draft message mein likha 4-6 letter ka code)'\n  ].join('\\n'));\n}\nconst rows = $input.all().map(i => i.json).filter(r => r);\nconst pending = Number((rows[0] || {}).pending) || 0;\nconst list = rows.filter(r => r.phone);\nconst ago = d => { if (!d) return 'kabhi nahi'; const h = Math.floor((Date.now() - new Date(d).getTime()) / 3600000); return h < 1 ? '1 ghante se kam pehle' : h < 48 ? h + ' ghante pehle' : Math.floor(h / 24) + ' din pehle'; };\nconst st = { draft: 'draft ready (approve nahi hua)', sent: 'bheja gaya', sending: 'bhej rahe hain', failed: 'fail hua', skipped: 'skip kiya', expired: 'draft expire hua' };\nif (!list.length) return out('📊 Abhi koi client/lead save nahi hai.\\nShuru karne ke liye:\\nCLIENT: Naam | 10-digit number | lead | kya chahiye' + (pending ? '\\n\\n📝 Pending drafts: ' + pending : ''));\nconst lines = list.map((r, i) => (i + 1) + '. ' + (r.display_name || r.phone) + (r.business_name ? ' (' + r.business_name + ')' : '') + ' - ' + r.phone +\n  '\\n   last activity: ' + ago(r.last_active) + ' | outreach: ' + (st[r.last_outreach] || 'abhi tak nahi') + (r.last_sent ? ' (' + ago(r.last_sent) + ')' : '') + (r.do_not_contact ? ' | ⛔ STOP bola' : ''));\nreturn out('📊 Clients / leads (' + list.length + '):\\n\\n' + lines.join('\\n') + (pending ? '\\n\\n📝 Pending drafts jo approve hone baaki: ' + pending + ' (SEND/SKIP <code>)' : ''));\n"
+      }
     }
   ],
   "connections": {
@@ -2491,7 +2572,7 @@
         ],
         [
           {
-            "node": "Validate & Extract",
+            "node": "Info cmd?",
             "type": "main",
             "index": 0
           }
@@ -2514,6 +2595,57 @@
         [
           {
             "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Info cmd?": {
+      "main": [
+        [
+          {
+            "node": "Parse Info Command",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validate & Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Info Command": {
+      "main": [
+        [
+          {
+            "node": "Load Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Info": {
+      "main": [
+        [
+          {
+            "node": "Build Info Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Info Reply": {
+      "main": [
+        [
+          {
+            "node": "Confirm Status to Owner",
             "type": "main",
             "index": 0
           }
