@@ -58,3 +58,7 @@ In your "Message yourself" chat:
 
 Answered straight from the database (no AI). Tests: `tests/owner/run.mjs`.
 The coach prompt now forbids inventing your hobbies/trips/jobs in sample messages; it uses placeholders like `[apna interest]`.
+
+## Clients-only mode (default ON)
+
+The AI auto-reply, and saving of incoming messages, happens only for contacts whose type is `client`. Friends, family, teachers and unknown numbers are ignored (no reply, no message stored, so less storage). To turn it off: `INSERT INTO bot_settings(key,value) VALUES ('clients_only','off') ON CONFLICT (key) DO UPDATE SET value='off';`
